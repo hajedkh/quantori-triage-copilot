@@ -1,0 +1,340 @@
+"""OpenAI-style tool schemas + implementations wrapping chem.py.
+
+chem.py stays untouched RDKit (only lipinski_pass() got optional threshold
+params). screen()/rank() aren't called from here — this module composes their
+smaller building blocks directly (parse, descriptors, lipinski_pass,
+pains_flag, fingerprint, max_tanimoto, build_active_fps, QED, _confidence),
+which is what lets these tools expose tunable thresholds/weights without
+touching screen()/rank() themselves.
+
+Each tool does real RDKit work, writes the full result onto the Run object,
+and returns a compact summary (counts + at most 3 examples) — the model acts
+by reference against these summaries, never against the full candidate list.
+"""
+
+from __future__ import annotations
+
+from . import chem
+from .store import emit
+
+_MAX_EXAMPLES = 3
+_MAX_BATCH = 10
+
+
+# ---------------------------------------------------------------- schemas --
+
+# Keep descriptions to one short sentence — verbose ones make some local
+# models (mistral, tested directly) silently stop calling tools and narrate
+# instead. Reasoning detail belongs in the system prompt, not here.
+
+def screen_candidates_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "screen_candidates",
+            "description": "Filter the candidate library by drug-likeness/PAINS and score survivors by similarity to known actives.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mw_max": {"type": "number", "description": "Max molecular weight. Default 500."},
+                    "logp_max": {"type": "number", "description": "Max logP. Default 5."},
+                    "hbd_max": {"type": "integer", "description": "Max H-bond donors. Default 5."},
+                    "hba_max": {"type": "integer", "description": "Max H-bond acceptors. Default 10."},
+                    "apply_pains": {"type": "boolean", "description": "Drop PAINS-flagged structures. Default true."},
+                },
+                "required": [],
+            },
+        },
+    }
+
+
+def compute_descriptors_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "compute_descriptors",
+            "description": "Get MW/logP/HBD/HBA for specific SMILES you name, to spot-check them.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "smiles_list": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": f"Up to {_MAX_BATCH} SMILES to inspect.",
+                    }
+                },
+                "required": ["smiles_list"],
+            },
+        },
+    }
+
+
+def similarity_to_actives_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "similarity_to_actives",
+            "description": "Get Tanimoto similarity of specific SMILES you name to the known active binders.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "smiles_list": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": f"Up to {_MAX_BATCH} SMILES to score.",
+                    }
+                },
+                "required": ["smiles_list"],
+            },
+        },
+    }
+
+
+def rank_survivors_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "rank_survivors",
+            "description": "Score and rank the current survivors into the final shortlist using your chosen weights.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "top_n": {"type": "integer", "description": "Max results to keep. Default 600."},
+                    "weights": {
+                        "type": "object",
+                        "description": "similarity/qed/pains weights. Defaults 0.6/0.3/0.1.",
+                        "properties": {
+                            "similarity": {"type": "number"},
+                            "qed": {"type": "number"},
+                            "pains": {"type": "number"},
+                        },
+                    },
+                },
+                "required": [],
+            },
+        },
+    }
+
+
+def get_funnel_stats_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_funnel_stats",
+            "description": "Get the counts from the last screen_candidates call (input/invalid/dropped/survivors).",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+CHEM_TOOLS = [
+    screen_candidates_schema(),
+    compute_descriptors_schema(),
+    similarity_to_actives_schema(),
+    get_funnel_stats_schema(),
+]
+
+CRITIC_TOOLS = [
+    compute_descriptors_schema(),
+    get_funnel_stats_schema(),
+    rank_survivors_schema(),
+]
+
+
+# ---------------------------------------------------------- implementations --
+
+def _screen_candidates(
+    run,
+    mw_max: float = 500,
+    logp_max: float = 5,
+    hbd_max: int = 5,
+    hba_max: int = 10,
+    apply_pains: bool = True,
+) -> dict:
+    active_fps, _ = chem.build_active_fps(run.known_actives)
+
+    n_input = len(run.candidates)
+    n_invalid = n_lipinski = n_pains = 0
+    survivors: list[dict] = []
+    invalid_examples: list[str] = []
+
+    for c in run.candidates:
+        mol = chem.parse(c["smiles"])
+        if mol is None:
+            n_invalid += 1
+            if len(invalid_examples) < _MAX_EXAMPLES:
+                invalid_examples.append(c["smiles"])
+            continue
+        d = chem.descriptors(mol)
+        lip = chem.lipinski_pass(d, mw_max=mw_max, logp_max=logp_max, hbd_max=hbd_max, hba_max=hba_max)
+        if not lip:
+            n_lipinski += 1
+            continue
+        flagged = chem.pains_flag(mol)
+        if apply_pains and flagged:
+            n_pains += 1
+            continue
+        sim, idx = chem.max_tanimoto(chem.fingerprint(mol), active_fps)
+        try:
+            qed = round(chem.QED.qed(mol), 3)
+        except Exception:
+            qed = 0.5
+        survivors.append(
+            {
+                "smiles": chem.Chem.MolToSmiles(mol),
+                "label": c.get("label"),
+                **d,
+                "qed": qed,
+                "lipinski_pass": lip,
+                "pains_flag": flagged,
+                "max_similarity": sim,
+                "nearest_active": f"active#{idx}" if idx >= 0 else "-",
+            }
+        )
+
+    stats = {
+        "input": n_input,
+        "invalid": n_invalid,
+        "lipinski_dropped": n_lipinski,
+        "pains_dropped": n_pains,
+        "after_lipinski": n_input - n_invalid - n_lipinski,
+        "survivors": len(survivors),
+    }
+    run.survivors = survivors
+    run.screen_stats = stats
+
+    emit(run, {"type": "funnel", "payload": {"input": n_input, "filtered": len(survivors), "ranked": None}})
+
+    summary = {
+        "thresholds": {
+            "mw_max": mw_max,
+            "logp_max": logp_max,
+            "hbd_max": hbd_max,
+            "hba_max": hba_max,
+            "apply_pains": apply_pains,
+        },
+        "stats": stats,
+        "survivor_examples": [
+            {"smiles": s["smiles"], "max_similarity": s["max_similarity"], "qed": s["qed"]}
+            for s in survivors[:_MAX_EXAMPLES]
+        ],
+    }
+    if invalid_examples:
+        summary["invalid_examples"] = invalid_examples
+        summary["hint"] = (
+            f"{n_invalid} candidate(s) could not be parsed as SMILES and were already "
+            "excluded from survivors. Call compute_descriptors on one of "
+            "invalid_examples if you want to double-check before finalizing."
+        )
+    return summary
+
+
+def _compute_descriptors(smiles_list: list) -> dict:
+    if not smiles_list:
+        raise ValueError("smiles_list must not be empty")
+    smiles_list = smiles_list[:_MAX_BATCH]
+    results, bad = [], []
+    for smi in smiles_list:
+        mol = chem.parse(smi)
+        if mol is None:
+            bad.append(smi)
+            continue
+        results.append({"smiles": smi, **chem.descriptors(mol)})
+    if bad:
+        raise ValueError(f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}")
+    return {"count": len(results), "results": results}
+
+
+def _similarity_to_actives(run, smiles_list: list) -> dict:
+    if not smiles_list:
+        raise ValueError("smiles_list must not be empty")
+    smiles_list = smiles_list[:_MAX_BATCH]
+    active_fps, active_ids = chem.build_active_fps(run.known_actives)
+    results, bad = [], []
+    for smi in smiles_list:
+        mol = chem.parse(smi)
+        if mol is None:
+            bad.append(smi)
+            continue
+        sim, idx = chem.max_tanimoto(chem.fingerprint(mol), active_fps)
+        nearest = active_ids[idx] if 0 <= idx < len(active_ids) else None
+        results.append({"smiles": smi, "max_similarity": sim, "nearest_active_index": nearest})
+    if bad:
+        raise ValueError(f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}")
+    return {"count": len(results), "results": results}
+
+
+def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
+    weights = weights or {}
+    w_sim = weights.get("similarity", 0.6)
+    w_qed = weights.get("qed", 0.3)
+    w_pains = weights.get("pains", 0.1)
+
+    survivors = run.survivors
+    active_ids = run.active_ids
+    scored = []
+    for s in survivors:
+        sim = s["max_similarity"]
+        score = w_sim * sim + w_qed * s["qed"] + w_pains * (0.0 if s["pains_flag"] else 1.0)
+        conf = chem._confidence(sim, s["lipinski_pass"])
+        if conf == "Low":
+            continue
+        idx = int(s["nearest_active"].split("#")[-1]) if "#" in s["nearest_active"] else -1
+        nearest = active_ids[idx] if 0 <= idx < len(active_ids) else s["nearest_active"]
+        reason = (
+            f"{sim:.2f} Tanimoto to {nearest} (known active); "
+            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski; "
+            f"{'no PAINS' if not s['pains_flag'] else 'PAINS flagged'}."
+        )
+        scored.append(
+            {
+                "smiles": s["smiles"],
+                "score": round(min(score, 0.99), 3),
+                "confidence": conf,
+                "reason": reason,
+                "nearest_active": nearest,
+                "max_similarity": sim,
+                "is_known_active": bool(s.get("label")) if s.get("label") is not None else False,
+            }
+        )
+
+    scored.sort(key=lambda r: r["score"], reverse=True)
+    top = scored[:top_n]
+    for i, r in enumerate(top, 1):
+        r["rank"] = i
+
+    run.ranked = top
+
+    n_in = len(run.candidates)
+    emit(run, {"type": "funnel", "payload": {"input": n_in, "filtered": len(survivors), "ranked": len(top)}})
+
+    scores = [r["score"] for r in top]
+    return {
+        "weights_used": {"similarity": w_sim, "qed": w_qed, "pains": w_pains},
+        "ranked_count": len(top),
+        "score_range": [min(scores), max(scores)] if scores else [None, None],
+        "top_examples": top[:_MAX_EXAMPLES],
+    }
+
+
+def _get_funnel_stats(run) -> dict:
+    if run.screen_stats is None:
+        raise ValueError("no screen has been run yet — call screen_candidates first")
+    return dict(run.screen_stats)
+
+
+async def execute_tool(run, name: str, args: dict) -> dict:
+    """Dispatch a model-requested tool call by name. Sync chem work under an
+    async signature so loop.py can `await` every tool uniformly."""
+    args = args or {}
+    if name == "screen_candidates":
+        return _screen_candidates(run, **args)
+    if name == "compute_descriptors":
+        return _compute_descriptors(**args)
+    if name == "similarity_to_actives":
+        return _similarity_to_actives(run, **args)
+    if name == "rank_survivors":
+        return _rank_survivors(run, **args)
+    if name == "get_funnel_stats":
+        return _get_funnel_stats(run)
+    raise ValueError(f"unknown tool: {name!r}")

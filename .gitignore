@@ -1,0 +1,14 @@
+.env
+.env.local
+CLAUDE.md
+.claude/
+*.zip
+.DS_Store
+node_modules/
+dist/
+dist-ssr/
+__pycache__/
+*.pyc
+.venv/
+backend/runs/*/
+!backend/runs/.gitkeep

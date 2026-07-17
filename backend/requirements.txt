@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+sse-starlette
+python-multipart
+requests
+rdkit
+langgraph
+openai
+python-dotenv
+pydantic-settings
