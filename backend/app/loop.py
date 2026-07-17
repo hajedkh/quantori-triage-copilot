@@ -13,7 +13,7 @@ tool_call event's "error"/"retry" status is what makes that visible on the wire.
 from __future__ import annotations
 
 import json
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from . import llm as llm_module
 from .store import emit

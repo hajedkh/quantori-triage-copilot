@@ -33,7 +33,8 @@ def screen_candidates_schema() -> dict:
         "type": "function",
         "function": {
             "name": "screen_candidates",
-            "description": "Filter the candidate library by drug-likeness/PAINS and score survivors by similarity to known actives.",
+            "description": "Filter the candidate library by drug-likeness/PAINS and score survivors by "
+            + "similarity to known actives.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -155,7 +156,8 @@ def submit_ranking_schema() -> dict:
         "type": "function",
         "function": {
             "name": "submit_ranking",
-            "description": "Submit the final ranked shortlist with per-compound evidence notes. Call AFTER rank_survivors.",
+            "description": "Submit the final ranked shortlist with per-compound evidence notes. Call "
+            + "AFTER rank_survivors.",
             "parameters": {
                 "type": "object",
                 "properties": {
