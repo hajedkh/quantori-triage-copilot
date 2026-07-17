@@ -24,9 +24,7 @@ class Run:
     dossier: str = ""
     citations: list = field(default_factory=list)
     metric: dict | None = None
-    screen_stats: dict | None = (
-        None  # stats dict from the last screen_candidates tool call
-    )
+    screen_stats: dict | None = None  # stats dict from the last screen_candidates tool call
 
 
 # run_id -> Run
