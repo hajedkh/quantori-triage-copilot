@@ -27,6 +27,7 @@ _MAX_BATCH = 10
 # models (mistral, tested directly) silently stop calling tools and narrate
 # instead. Reasoning detail belongs in the system prompt, not here.
 
+
 def screen_candidates_schema() -> dict:
     return {
         "type": "function",
@@ -36,11 +37,26 @@ def screen_candidates_schema() -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "mw_max": {"type": "number", "description": "Max molecular weight. Default 500."},
-                    "logp_max": {"type": "number", "description": "Max logP. Default 5."},
-                    "hbd_max": {"type": "integer", "description": "Max H-bond donors. Default 5."},
-                    "hba_max": {"type": "integer", "description": "Max H-bond acceptors. Default 10."},
-                    "apply_pains": {"type": "boolean", "description": "Drop PAINS-flagged structures. Default true."},
+                    "mw_max": {
+                        "type": "number",
+                        "description": "Max molecular weight. Default 500.",
+                    },
+                    "logp_max": {
+                        "type": "number",
+                        "description": "Max logP. Default 5.",
+                    },
+                    "hbd_max": {
+                        "type": "integer",
+                        "description": "Max H-bond donors. Default 5.",
+                    },
+                    "hba_max": {
+                        "type": "integer",
+                        "description": "Max H-bond acceptors. Default 10.",
+                    },
+                    "apply_pains": {
+                        "type": "boolean",
+                        "description": "Drop PAINS-flagged structures. Default true.",
+                    },
                 },
                 "required": [],
             },
@@ -99,7 +115,10 @@ def rank_survivors_schema() -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "top_n": {"type": "integer", "description": "Max results to keep. Default 600."},
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Max results to keep. Default 600.",
+                    },
                     "weights": {
                         "type": "object",
                         "description": "similarity/qed/pains weights. Defaults 0.6/0.3/0.1.",
@@ -143,6 +162,7 @@ CRITIC_TOOLS = [
 
 # ---------------------------------------------------------- implementations --
 
+
 def _screen_candidates(
     run,
     mw_max: float = 500,
@@ -166,7 +186,9 @@ def _screen_candidates(
                 invalid_examples.append(c["smiles"])
             continue
         d = chem.descriptors(mol)
-        lip = chem.lipinski_pass(d, mw_max=mw_max, logp_max=logp_max, hbd_max=hbd_max, hba_max=hba_max)
+        lip = chem.lipinski_pass(
+            d, mw_max=mw_max, logp_max=logp_max, hbd_max=hbd_max, hba_max=hba_max
+        )
         if not lip:
             n_lipinski += 1
             continue
@@ -203,7 +225,13 @@ def _screen_candidates(
     run.survivors = survivors
     run.screen_stats = stats
 
-    emit(run, {"type": "funnel", "payload": {"input": n_input, "filtered": len(survivors), "ranked": None}})
+    emit(
+        run,
+        {
+            "type": "funnel",
+            "payload": {"input": n_input, "filtered": len(survivors), "ranked": None},
+        },
+    )
 
     summary = {
         "thresholds": {
@@ -215,7 +243,11 @@ def _screen_candidates(
         },
         "stats": stats,
         "survivor_examples": [
-            {"smiles": s["smiles"], "max_similarity": s["max_similarity"], "qed": s["qed"]}
+            {
+                "smiles": s["smiles"],
+                "max_similarity": s["max_similarity"],
+                "qed": s["qed"],
+            }
             for s in survivors[:_MAX_EXAMPLES]
         ],
     }
@@ -241,7 +273,9 @@ def _compute_descriptors(smiles_list: list) -> dict:
             continue
         results.append({"smiles": smi, **chem.descriptors(mol)})
     if bad:
-        raise ValueError(f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}")
+        raise ValueError(
+            f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}"
+        )
     return {"count": len(results), "results": results}
 
 
@@ -258,9 +292,13 @@ def _similarity_to_actives(run, smiles_list: list) -> dict:
             continue
         sim, idx = chem.max_tanimoto(chem.fingerprint(mol), active_fps)
         nearest = active_ids[idx] if 0 <= idx < len(active_ids) else None
-        results.append({"smiles": smi, "max_similarity": sim, "nearest_active_index": nearest})
+        results.append(
+            {"smiles": smi, "max_similarity": sim, "nearest_active_index": nearest}
+        )
     if bad:
-        raise ValueError(f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}")
+        raise ValueError(
+            f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}"
+        )
     return {"count": len(results), "results": results}
 
 
@@ -275,11 +313,17 @@ def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
     scored = []
     for s in survivors:
         sim = s["max_similarity"]
-        score = w_sim * sim + w_qed * s["qed"] + w_pains * (0.0 if s["pains_flag"] else 1.0)
+        score = (
+            w_sim * sim + w_qed * s["qed"] + w_pains * (0.0 if s["pains_flag"] else 1.0)
+        )
         conf = chem._confidence(sim, s["lipinski_pass"])
         if conf == "Low":
             continue
-        idx = int(s["nearest_active"].split("#")[-1]) if "#" in s["nearest_active"] else -1
+        idx = (
+            int(s["nearest_active"].split("#")[-1])
+            if "#" in s["nearest_active"]
+            else -1
+        )
         nearest = active_ids[idx] if 0 <= idx < len(active_ids) else s["nearest_active"]
         reason = (
             f"{sim:.2f} Tanimoto to {nearest} (known active); "
@@ -294,7 +338,9 @@ def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
                 "reason": reason,
                 "nearest_active": nearest,
                 "max_similarity": sim,
-                "is_known_active": bool(s.get("label")) if s.get("label") is not None else False,
+                "is_known_active": (
+                    bool(s.get("label")) if s.get("label") is not None else False
+                ),
             }
         )
 
@@ -306,7 +352,13 @@ def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
     run.ranked = top
 
     n_in = len(run.candidates)
-    emit(run, {"type": "funnel", "payload": {"input": n_in, "filtered": len(survivors), "ranked": len(top)}})
+    emit(
+        run,
+        {
+            "type": "funnel",
+            "payload": {"input": n_in, "filtered": len(survivors), "ranked": len(top)},
+        },
+    )
 
     scores = [r["score"] for r in top]
     return {

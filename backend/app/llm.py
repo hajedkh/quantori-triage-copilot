@@ -68,7 +68,13 @@ def load_config(provider: str | None = None) -> LLMConfig:
     # The OpenAI SDK rejects an empty api_key even though Ollama itself
     # ignores it, so fall back to a dummy non-empty string.
     api_key = os.environ.get(f"{prefix}_API_KEY") or "ollama"
-    return LLMConfig(provider=provider, base_url=base_url, api_key=api_key, model=model, temperature=0.2)
+    return LLMConfig(
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        temperature=0.2,
+    )
 
 
 _active_cfg: LLMConfig | None = None
@@ -167,7 +173,11 @@ def list_ollama_models(timeout: float = 3.0) -> list[str]:
     the model dropdown. Empty list if Ollama is unreachable."""
     try:
         cfg = load_config("ollama")
-        base = cfg.base_url[:-3] if cfg.base_url.rstrip("/").endswith("/v1") else cfg.base_url
+        base = (
+            cfg.base_url[:-3]
+            if cfg.base_url.rstrip("/").endswith("/v1")
+            else cfg.base_url
+        )
         r = requests.get(f"{base.rstrip('/')}/api/tags", timeout=timeout)
         r.raise_for_status()
         return [m["name"] for m in r.json().get("models", [])]
@@ -198,7 +208,9 @@ async def build_dossier(
 
 
 async def _llm_dossier(target: str, abstracts: list[dict], cfg: LLMConfig) -> str:
-    context = "\n".join(f"[PMID:{a['pmid']}] {a['title']}. {a['abstract']}" for a in abstracts[:4])
+    context = "\n".join(
+        f"[PMID:{a['pmid']}] {a['title']}. {a['abstract']}" for a in abstracts[:4]
+    )
     system = (
         "You are a drug-discovery knowledge agent. Write a concise 4-6 sentence "
         "dossier on the target using ONLY the provided sources. Cite sources inline "

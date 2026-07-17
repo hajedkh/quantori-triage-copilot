@@ -23,24 +23,55 @@ async def supervisor(run):
     target_id, pref = sources.resolve_target(run.target_name)
     run.target_id = target_id
     emit(run, {"type": "target_resolved", "payload": {"id": target_id}})
-    emit(run, {"type": "log", "agent": "supervisor",
-               "payload": f"Resolved {run.target_name} → {target_id} · {len(run.candidates)} molecules loaded"})
-    emit(run, {"type": "funnel", "payload": {"input": len(run.candidates), "filtered": None, "ranked": None}})
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "supervisor",
+            "payload": f"Resolved {run.target_name} → {target_id} · {len(run.candidates)} molecules loaded",
+        },
+    )
+    emit(
+        run,
+        {
+            "type": "funnel",
+            "payload": {"input": len(run.candidates), "filtered": None, "ranked": None},
+        },
+    )
     emit(run, {"type": "agent_done", "agent": "supervisor"})
 
 
 # ---------------- Knowledge ----------------
 async def knowledge(run):
     emit(run, {"type": "agent_start", "agent": "knowledge"})
-    emit(run, {"type": "log", "agent": "knowledge", "payload": "Querying ChEMBL for known actives (pChEMBL ≥ 6)…"})
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "knowledge",
+            "payload": "Querying ChEMBL for known actives (pChEMBL ≥ 6)…",
+        },
+    )
     actives, active_ids = sources.get_known_actives(run.target_id)
     run.known_actives = actives
     run.active_ids = active_ids
-    emit(run, {"type": "log", "agent": "knowledge",
-               "payload": f"Retrieved {len(actives)} known actives · fetching PubMed abstracts…"})
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "knowledge",
+            "payload": f"Retrieved {len(actives)} known actives · fetching PubMed abstracts…",
+        },
+    )
     abstracts = sources.pubmed_abstracts(run.target_name)
-    emit(run, {"type": "log", "agent": "knowledge",
-               "payload": f"Retrieved {len(abstracts)} abstracts · writing cited dossier…"})
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "knowledge",
+            "payload": f"Retrieved {len(abstracts)} abstracts · writing cited dossier…",
+        },
+    )
     dossier, citations = await llm.build_dossier(run.target_name, abstracts)
     run.dossier = dossier
     run.citations = citations
@@ -55,8 +86,14 @@ async def knowledge(run):
 # ---------------- Cheminformatics (real tool-calling agent) ----------------
 async def cheminformatics(run):
     emit(run, {"type": "agent_start", "agent": "cheminformatics"})
-    emit(run, {"type": "log", "agent": "cheminformatics",
-               "payload": "Agentic filtering — deciding thresholds and strategy…"})
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "cheminformatics",
+            "payload": "Agentic filtering — deciding thresholds and strategy…",
+        },
+    )
 
     system_prompt = (
         "You are the Cheminformatics agent in a drug-discovery triage pipeline. "
@@ -86,11 +123,23 @@ async def cheminformatics(run):
 
     cfg = llm.get_active_config()  # whatever provider/model is selected in the UI
     summary = await loop.run_tool_loop(
-        run, "cheminformatics", system_prompt, user_msg, tools.CHEM_TOOLS, executor, cfg=cfg
+        run,
+        "cheminformatics",
+        system_prompt,
+        user_msg,
+        tools.CHEM_TOOLS,
+        executor,
+        cfg=cfg,
     )
 
-    emit(run, {"type": "log", "agent": "cheminformatics",
-               "payload": summary.strip() if summary else "Filtering complete."})
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "cheminformatics",
+            "payload": summary.strip() if summary else "Filtering complete.",
+        },
+    )
     emit(run, {"type": "agent_done", "agent": "cheminformatics"})
 
 
@@ -118,8 +167,14 @@ def _parse_critic_json(text: str):
 
 async def critic(run):
     emit(run, {"type": "agent_start", "agent": "critic"})
-    emit(run, {"type": "log", "agent": "critic",
-               "payload": "Agentic scoring — gathering evidence before ranking…"})
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "critic",
+            "payload": "Agentic scoring — gathering evidence before ranking…",
+        },
+    )
 
     system_prompt = (
         "You are the Critic/Ranking agent in a drug-discovery triage pipeline. "
@@ -154,13 +209,24 @@ async def critic(run):
     parsed = _parse_critic_json(raw)
 
     if parsed is None:
-        emit(run, {"type": "log", "agent": "critic",
-                   "payload": "Output wasn't valid JSON — retrying with a stricter instruction…"})
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "critic",
+                "payload": "Output wasn't valid JSON — retrying with a stricter instruction…",
+            },
+        )
         raw2 = await loop.run_tool_loop(
-            run, "critic",
-            system_prompt + "\n\nReturn ONLY valid JSON. No markdown fences. No commentary before or after.",
+            run,
+            "critic",
+            system_prompt
+            + "\n\nReturn ONLY valid JSON. No markdown fences. No commentary before or after.",
             "Your previous reply was not valid JSON. Return ONLY the JSON object now.",
-            tools.CRITIC_TOOLS, executor, cfg=cfg, max_iters=2,
+            tools.CRITIC_TOOLS,
+            executor,
+            cfg=cfg,
+            max_iters=2,
         )
         parsed = _parse_critic_json(raw2)
 
@@ -179,26 +245,58 @@ async def critic(run):
                 if ev:
                     r["evidence_used"] = ev
         if parsed and parsed.get("replan_reason"):
-            emit(run, {"type": "log", "agent": "critic",
-                       "payload": f"Model flagged yield concern: {parsed['replan_reason']}"})
+            emit(
+                run,
+                {
+                    "type": "log",
+                    "agent": "critic",
+                    "payload": f"Model flagged yield concern: {parsed['replan_reason']}",
+                },
+            )
     else:
-        emit(run, {"type": "log", "agent": "critic",
-                   "payload": "Agent never produced a ranking — falling back to deterministic chem.rank()."})
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "critic",
+                "payload": "Agent never produced a ranking — falling back to deterministic chem.rank().",
+            },
+        )
         ranked = chem.rank(run.survivors, run.active_ids)
         run.ranked = ranked
 
     n_in = len(run.candidates)
-    emit(run, {"type": "funnel", "payload": {"input": n_in, "filtered": len(run.survivors), "ranked": len(ranked)}})
+    emit(
+        run,
+        {
+            "type": "funnel",
+            "payload": {
+                "input": n_in,
+                "filtered": len(run.survivors),
+                "ranked": len(ranked),
+            },
+        },
+    )
     emit(run, {"type": "ranked", "payload": ranked})
     dropped = len(run.survivors) - len(ranked)
-    emit(run, {"type": "log", "agent": "critic",
-               "payload": f"Dropped {dropped} low-confidence · top {len(ranked)} ranked"})
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "critic",
+            "payload": f"Dropped {dropped} low-confidence · top {len(ranked)} ranked",
+        },
+    )
 
     total_actives = sum(1 for c in run.candidates if c.get("label"))
     recovered = sum(1 for r in ranked if r["is_known_active"])
     if total_actives > 0:
-        metric = {"recovered": recovered, "total_actives": total_actives,
-                  "top_n": len(ranked), "screened": n_in}
+        metric = {
+            "recovered": recovered,
+            "total_actives": total_actives,
+            "top_n": len(ranked),
+            "screened": n_in,
+        }
         run.metric = metric
         emit(run, {"type": "metric", "payload": metric})
 

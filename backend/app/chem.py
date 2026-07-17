@@ -38,8 +38,19 @@ def descriptors(mol) -> dict:
     }
 
 
-def lipinski_pass(d: dict, mw_max: float = 500, logp_max: float = 5, hbd_max: int = 5, hba_max: int = 10) -> bool:
-    return d["mw"] <= mw_max and d["logp"] <= logp_max and d["hbd"] <= hbd_max and d["hba"] <= hba_max
+def lipinski_pass(
+    d: dict,
+    mw_max: float = 500,
+    logp_max: float = 5,
+    hbd_max: int = 5,
+    hba_max: int = 10,
+) -> bool:
+    return (
+        d["mw"] <= mw_max
+        and d["logp"] <= logp_max
+        and d["hbd"] <= hbd_max
+        and d["hba"] <= hba_max
+    )
 
 
 def pains_flag(mol) -> bool:
@@ -131,7 +142,9 @@ def _confidence(sim: float, lip: bool) -> str:
     return "Low"
 
 
-def rank(survivors: list[dict], active_chembl_ids: list[str], top_n: int = 600) -> list[dict]:
+def rank(
+    survivors: list[dict], active_chembl_ids: list[str], top_n: int = 600
+) -> list[dict]:
     """Score, bucket confidence, drop Low, sort, take top_n, assign ranks."""
     scored = []
     for s in survivors:
@@ -141,7 +154,11 @@ def rank(survivors: list[dict], active_chembl_ids: list[str], top_n: int = 600) 
         if conf == "Low":
             continue
         # map nearest active index -> a chembl-ish id for display
-        idx = int(s["nearest_active"].split("#")[-1]) if "#" in s["nearest_active"] else -1
+        idx = (
+            int(s["nearest_active"].split("#")[-1])
+            if "#" in s["nearest_active"]
+            else -1
+        )
         nearest = (
             active_chembl_ids[idx]
             if 0 <= idx < len(active_chembl_ids)
@@ -160,7 +177,9 @@ def rank(survivors: list[dict], active_chembl_ids: list[str], top_n: int = 600) 
                 "reason": reason,
                 "nearest_active": nearest,
                 "max_similarity": sim,
-                "is_known_active": bool(s.get("label")) if s.get("label") is not None else False,
+                "is_known_active": (
+                    bool(s.get("label")) if s.get("label") is not None else False
+                ),
             }
         )
 

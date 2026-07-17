@@ -9,10 +9,29 @@ from rdkit import Chem
 def write_csv(path: Path, ranked: list[dict]) -> None:
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["rank", "smiles", "score", "confidence", "nearest_active", "max_similarity", "reason"])
+        w.writerow(
+            [
+                "rank",
+                "smiles",
+                "score",
+                "confidence",
+                "nearest_active",
+                "max_similarity",
+                "reason",
+            ]
+        )
         for r in ranked:
-            w.writerow([r["rank"], r["smiles"], r["score"], r["confidence"],
-                        r["nearest_active"], r["max_similarity"], r["reason"]])
+            w.writerow(
+                [
+                    r["rank"],
+                    r["smiles"],
+                    r["score"],
+                    r["confidence"],
+                    r["nearest_active"],
+                    r["max_similarity"],
+                    r["reason"],
+                ]
+            )
 
 
 def write_sdf(path: Path, ranked: list[dict]) -> None:
@@ -29,8 +48,14 @@ def write_sdf(path: Path, ranked: list[dict]) -> None:
     w.close()
 
 
-def write_report(path: Path, target: str, dossier: str, citations: list[dict],
-                 ranked: list[dict], metric: dict | None) -> None:
+def write_report(
+    path: Path,
+    target: str,
+    dossier: str,
+    citations: list[dict],
+    ranked: list[dict],
+    metric: dict | None,
+) -> None:
     lines = [f"# Target Triage Report — {target}", ""]
     if metric:
         lines += [
@@ -38,23 +63,45 @@ def write_report(path: Path, target: str, dossier: str, citations: list[dict],
             f"known actives in the top {metric['top_n']} (from {metric['screened']} screened).",
             "",
         ]
-    lines += ["## Target dossier", "", dossier.replace("[[PMID:", "[PMID:").replace("]]", "]"), ""]
+    lines += [
+        "## Target dossier",
+        "",
+        dossier.replace("[[PMID:", "[PMID:").replace("]]", "]"),
+        "",
+    ]
     if citations:
         lines += ["### Citations", ""]
         for c in citations:
-            lines.append(f"- [PMID:{c['pmid']}](https://pubmed.ncbi.nlm.nih.gov/{c['pmid']}/) — {c['claim']}")
+            lines.append(
+                f"- [PMID:{c['pmid']}](https://pubmed.ncbi.nlm.nih.gov/{c['pmid']}/) — {c['claim']}"
+            )
         lines.append("")
-    lines += ["## Ranked shortlist", "", "| Rank | Score | Confidence | SMILES | Rationale |",
-              "|---|---|---|---|---|"]
+    lines += [
+        "## Ranked shortlist",
+        "",
+        "| Rank | Score | Confidence | SMILES | Rationale |",
+        "|---|---|---|---|---|",
+    ]
     for r in ranked:
-        lines.append(f"| {r['rank']} | {r['score']:.2f} | {r['confidence']} | `{r['smiles']}` | {r['reason']} |")
-    lines += ["", "_Triage, not oracle — every candidate carries confidence and provenance; "
-              "a human approved this shortlist before export._"]
+        lines.append(
+            f"| {r['rank']} | {r['score']:.2f} | {r['confidence']} | `{r['smiles']}` | {r['reason']} |"
+        )
+    lines += [
+        "",
+        "_Triage, not oracle — every candidate carries confidence and provenance; "
+        "a human approved this shortlist before export._",
+    ]
     path.write_text("\n".join(lines))
 
 
-def export_all(run_dir: Path, target: str, dossier: str, citations: list[dict],
-               ranked: list[dict], metric: dict | None) -> None:
+def export_all(
+    run_dir: Path,
+    target: str,
+    dossier: str,
+    citations: list[dict],
+    ranked: list[dict],
+    metric: dict | None,
+) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     write_csv(run_dir / "shortlist.csv", ranked)
     write_sdf(run_dir / "shortlist.sdf", ranked)
