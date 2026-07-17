@@ -143,9 +143,52 @@ def write_csv(path: Path, ranked: list[dict]) -> None:
             w.writerow(_enrich_row(r))
 
 
-def write_sdf(path: Path, ranked: list[dict]) -> None:
-    """Write SDF with all computed properties as mol fields."""
+def _embed_3d(mol):
+    """Generate a 3D conformer with ETKDG + MMFF94 optimization.
+
+    Returns the mol with 3D coords, or None if embedding fails.
+    Pipeline: AddHs → ETKDGv3 embed → MMFF94 optimize (UFF fallback).
+    """
+    from rdkit.Chem import AllChem
+
+    mol = Chem.AddHs(mol)
+
+    # ETKDGv3 is the best-quality conformer generator in RDKit
+    params = AllChem.ETKDGv3()
+    params.randomSeed = 42  # reproducible for the demo
+    status = AllChem.EmbedMolecule(mol, params)
+    if status == -1:
+        # Retry with more permissive settings for strained molecules
+        params.useRandomCoords = True
+        params.maxAttempts = 50
+        status = AllChem.EmbedMolecule(mol, params)
+        if status == -1:
+            return None
+
+    # Force field optimization — MMFF94 preferred, UFF fallback
+    try:
+        result = AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
+        # result: 0 = converged, 1 = not converged but still usable, -1 = setup failed
+        if result == -1:
+            AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+    except Exception:
+        try:
+            AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+        except Exception:
+            pass  # keep the ETKDG geometry unoptimized
+
+    return mol
+
+
+def write_sdf(path: Path, ranked: list[dict], gen_3d: bool = True) -> None:
+    """Write SDF with 3D conformers (ETKDG + MMFF94) and all computed properties.
+
+    When gen_3d is True (default), each molecule gets a force-field-optimized
+    3D conformer. Molecules that fail embedding are written as 2D.
+    """
     w = Chem.SDWriter(str(path))
+    n_3d = n_2d = 0
+
     for r in ranked:
         mol = chem.parse(r["smiles"])
         if mol is None:
@@ -153,11 +196,25 @@ def write_sdf(path: Path, ranked: list[dict]) -> None:
 
         ext = chem.extended_descriptors(mol)
 
+        # Attempt 3D conformer generation
+        mol_3d = None
+        if gen_3d:
+            mol_3d = _embed_3d(mol)
+
+        if mol_3d is not None:
+            out_mol = mol_3d
+            out_mol.SetProp("_3d_status", "MMFF94_optimized")
+            n_3d += 1
+        else:
+            out_mol = mol
+            out_mol.SetProp("_3d_status", "2D_only")
+            n_2d += 1
+
         # Ranking fields
-        mol.SetProp("rank", str(r.get("rank", "")))
-        mol.SetProp("score", f'{r["score"]:.3f}')
-        mol.SetProp("confidence", r.get("confidence", ""))
-        mol.SetProp("nearest_active", str(r.get("nearest_active", "")))
+        out_mol.SetProp("rank", str(r.get("rank", "")))
+        out_mol.SetProp("score", f'{r["score"]:.3f}')
+        out_mol.SetProp("confidence", r.get("confidence", ""))
+        out_mol.SetProp("nearest_active", str(r.get("nearest_active", "")))
 
         # Numeric descriptors
         for key in [
@@ -178,22 +235,24 @@ def write_sdf(path: Path, ranked: list[dict]) -> None:
         ]:
             val = ext.get(key)
             if val is not None:
-                mol.SetProp(key, str(val))
+                out_mol.SetProp(key, str(val))
 
         # Float descriptors with precision
         for key in ["qed", "sa_score"]:
             val = ext.get(key)
             if val is not None:
-                mol.SetProp(key, f"{val:.3f}")
+                out_mol.SetProp(key, f"{val:.3f}")
 
         # String descriptors
         for key in ["scaffold", "molecular_formula", "inchikey", "pains_alerts"]:
             val = ext.get(key)
             if val:
-                mol.SetProp(key, val)
+                out_mol.SetProp(key, val)
 
-        w.write(mol)
+        w.write(out_mol)
     w.close()
+
+    return {"3d_conformers": n_3d, "2d_fallback": n_2d}
 
 
 def write_report(
