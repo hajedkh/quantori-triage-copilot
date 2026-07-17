@@ -222,65 +222,28 @@ def _screen_candidates(
     apply_pains: bool = True,
     max_violations: int = 1,
 ) -> dict:
-    active_fps, _ = chem.build_active_fps(run.known_actives)
-
-    n_input = len(run.candidates)
-    n_invalid = n_lipinski = n_pains = n_qed_err = 0
-    survivors: list[dict] = []
-    invalid_examples: list[str] = []
-
-    for c in run.candidates:
-        mol = chem.parse(c["smiles"])
-        if mol is None:
-            n_invalid += 1
-            if len(invalid_examples) < _MAX_EXAMPLES:
-                invalid_examples.append(c["smiles"])
-            continue
-        d = chem.descriptors(mol)
-        violations = chem.lipinski_violations(
-            d, mw_max=mw_max, logp_max=logp_max, hbd_max=hbd_max, hba_max=hba_max
-        )
-        if len(violations) > max_violations:
-            n_lipinski += 1
-            continue
-        alerts = chem.pains_flag(mol)
-        if apply_pains and alerts:
-            n_pains += 1
-            continue
-        sim, idx = chem.max_tanimoto(chem.fingerprint(mol), active_fps)
-        qed_error = False
-        try:
-            qed = round(chem.QED.qed(mol), 3)
-        except Exception:
-            qed = None
-            qed_error = True
-            n_qed_err += 1
-        canonical_smi = chem.Chem.MolToSmiles(mol)
-        survivors.append(
-            {
-                "smiles": canonical_smi,
-                "label": c.get("label"),
-                **d,
-                "qed": qed,
-                "qed_error": qed_error,
-                "lipinski_pass": True,
-                "lipinski_violations": violations,
-                "pains_flag": bool(alerts),
-                "pains_alerts": alerts,
-                "max_similarity": sim,
-                "nearest_active": f"active#{idx}" if idx >= 0 else "-",
-            }
-        )
-
-    stats = {
-        "input": n_input,
-        "invalid": n_invalid,
-        "lipinski_dropped": n_lipinski,
-        "pains_dropped": n_pains,
-        "qed_errors": n_qed_err,
-        "after_lipinski": n_input - n_invalid - n_lipinski,
-        "survivors": len(survivors),
+    thresholds = {
+        "mw_max": mw_max,
+        "logp_max": logp_max,
+        "hbd_max": hbd_max,
+        "hba_max": hba_max,
+        "apply_pains": apply_pains,
+        "max_violations": max_violations,
     }
+
+    # Reuse a persistent pool across re-screens — the agent often calls
+    # screen_candidates 2-3 times with adjusted thresholds. Creating the
+    # pool once avoids repeated fork + active-fps-rebuild overhead.
+    if getattr(run, "_screen_pool", None) is None:
+        run._screen_pool = chem.ScreenPool(run.known_actives)
+
+    survivors, stats, invalid_examples = chem.screen_parallel(
+        run.candidates,
+        run.known_actives,
+        thresholds,
+        pool=run._screen_pool,
+    )
+
     run.survivors = survivors
     run.screen_stats = stats
 
@@ -288,19 +251,16 @@ def _screen_candidates(
         run,
         {
             "type": "funnel",
-            "payload": {"input": n_input, "filtered": len(survivors), "ranked": None},
+            "payload": {
+                "input": stats["input"],
+                "filtered": stats["survivors"],
+                "ranked": None,
+            },
         },
     )
 
     summary = {
-        "thresholds": {
-            "mw_max": mw_max,
-            "logp_max": logp_max,
-            "hbd_max": hbd_max,
-            "hba_max": hba_max,
-            "apply_pains": apply_pains,
-            "max_lipinski_violations": max_violations,
-        },
+        "thresholds": thresholds,
         "stats": stats,
         "survivor_examples": [
             {
@@ -315,8 +275,8 @@ def _screen_candidates(
     if invalid_examples:
         summary["invalid_examples"] = invalid_examples
         summary["hint"] = (
-            f"{n_invalid} candidate(s) could not be parsed as SMILES and were already "
-            "excluded from survivors. Call compute_descriptors on one of "
+            f"{stats['invalid']} candidate(s) could not be parsed as SMILES and were "
+            "already excluded from survivors. Call compute_descriptors on one of "
             "invalid_examples if you want to double-check before finalizing."
         )
     return summary
@@ -344,7 +304,14 @@ def _similarity_to_actives(run, smiles_list: list) -> dict:
     if not smiles_list:
         raise ValueError("smiles_list must not be empty")
     smiles_list = smiles_list[:_MAX_BATCH]
-    active_fps, active_ids = chem.build_active_fps(run.known_actives)
+    # Cache active fps on run — build_active_fps re-parses all actives each
+    # call, which is wasteful when the agent spot-checks multiple times.
+    if getattr(run, "_cached_active_fps", None) is None:
+        fps, ids = chem.build_active_fps(run.known_actives)
+        run._cached_active_fps = fps
+        run._cached_active_ids = ids
+    active_fps = run._cached_active_fps
+    active_ids = run._cached_active_ids
     results, bad = [], []
     for smi in smiles_list:
         mol = chem.parse(smi)
@@ -397,11 +364,10 @@ def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
         reason += (
             f"; {'no PAINS' if not s.get('pains_flag') else 'PAINS flagged'}{qed_note}."
         )
-        # Always store canonical SMILES for reliable matching
-        canonical_smi = chem.canonical(s["smiles"]) or s["smiles"]
+        # SMILES are already canonical from screen_parallel / _process_one
         scored.append(
             {
-                "smiles": canonical_smi,
+                "smiles": s["smiles"],
                 "score": round(min(score, 0.99), 3),
                 "confidence": conf,
                 "reason": reason,
