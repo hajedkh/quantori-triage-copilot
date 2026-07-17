@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from . import graph, llm
+from . import graph, llm, loop, chat_tools
 from .store import Run, RUNS
 
 RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
@@ -122,6 +122,137 @@ async def download(run_id: str, kind: str):
     if not path.exists():
         raise HTTPException(404, "not exported yet - approve first")
     return FileResponse(path, filename=path.name)
+
+
+# ---------------------------------------------------------------- chat copilot --
+# Not a new agent: reuses loop.run_tool_loop with a different tool set
+# (chat_tools.py). Present from the first screen (POST /session creates an
+# empty Run in "setup" status before any pipeline work exists) and stays
+# useful through the run and the approval gate.
+
+CHAT_SYSTEM_PROMPT = (
+    "You are the Triage Copilot for a drug-discovery screening pipeline. "
+    "Answer ONLY from your tools. Never invent a number, a molecule, a rank, "
+    "an IC50, or a rationale — if it isn't in reach of a tool, say you don't "
+    "know. You have no general chemistry knowledge to offer: everything you "
+    "state must trace to a tool result. Always cite: rank #, ChEMBL id, tool "
+    "name, or PMID. "
+    "Before any change, preview it and ask. A mutate tool called without "
+    "confirmed=true returns a preview, not a result — relay exactly what "
+    "would change and wait for the operator's yes before calling again with "
+    "confirmed=true. "
+    "While the pipeline is running you may only QUEUE guidance to the "
+    "agents; you have no direct control. Never claim a steer took effect — "
+    "report it as queued. "
+    "You cannot start a run yourself — there is no tool for it. If asked how "
+    "to begin, how to run this, or to start/launch a screen, tell the "
+    "operator plainly: choose a target protein and upload a candidate "
+    "library in the form on this screen, then click Run triage."
+)
+
+
+class ChatIn(BaseModel):
+    message: str
+
+
+class SteerIn(BaseModel):
+    message: str
+
+
+@app.post("/session")
+async def create_session():
+    """The frontend calls this on load so the chat has a run_id to talk to
+    before any target/library/pipeline exists."""
+    run_id = uuid.uuid4().hex[:8]
+    RUNS[run_id] = Run(id=run_id, status="setup")
+    return {"run_id": run_id}
+
+
+@app.post("/upload/{run_id}")
+async def upload_library(run_id: str, candidates: UploadFile = File(...)):
+    """Attach a candidate library to a setup-phase Run without starting the
+    graph — the chat's start_run tool is what actually begins it. POST /run
+    (the existing form path) still creates+starts a run in one step."""
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "run not found")
+    raw = await candidates.read()
+    parsed = parse_candidates(raw)
+    if not parsed:
+        raise HTTPException(400, "No SMILES found in the uploaded file.")
+    run.candidates = parsed
+    return {"count": len(parsed)}
+
+
+@app.post("/chat/{run_id}")
+async def chat(run_id: str, body: ChatIn):
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "run not found")
+
+    transcript = "".join(f"{t['role']}: {t['content']}\n" for t in run.chat_history[-6:])
+    user_msg = f"{transcript}user: {body.message}" if transcript else body.message
+    tools = chat_tools.tools_for_status(run.status)
+
+    async def executor(name, args):
+        return await chat_tools.execute_chat_tool(run, name, args)
+
+    # Hardcoded to the gateway, not get_active_config(): a single Ollama
+    # instance serializes requests, so chatting on Ollama during a run would
+    # slow the agents down with every turn. Agents keep whichever provider is
+    # selected in the UI; chat is pinned to the gateway so it never contends
+    # with them — this split is the reason the dual-provider setup exists.
+    cfg = llm.load_config("gateway")
+
+    start_idx = len(run.events)
+
+    async def gen():
+        # force_tool_first=False + a lower max_iters: chat-only speed tuning,
+        # doesn't touch cheminformatics/critic's calls (loop.py defaults unchanged).
+        # Run the loop as a background task and poll run.events so tool_call
+        # events reach the browser as they happen, not all at once after the
+        # whole loop finishes — that dead-air wait was the actual "thinking
+        # too long" complaint, not the LLM latency itself. Can't just drain
+        # run.queue here — that's the pipeline /stream's own queue, shared
+        # with a possibly-concurrent listener; polling run.events (append-only,
+        # already how every event gets recorded) doesn't steal from it.
+        task = asyncio.create_task(
+            loop.run_tool_loop(
+                run, "chat", CHAT_SYSTEM_PROMPT, user_msg, tools, executor,
+                cfg=cfg, max_iters=2, force_tool_first=False,
+            )
+        )
+        sent = start_idx
+        while not task.done():
+            if len(run.events) > sent:
+                for event in run.events[sent:]:
+                    if event.get("agent") == "chat":
+                        yield json.dumps(event)
+                sent = len(run.events)
+            await asyncio.sleep(0.05)
+        for event in run.events[sent:]:
+            if event.get("agent") == "chat":
+                yield json.dumps(event)
+
+        answer = task.result()
+        run.chat_history.append({"role": "user", "content": body.message})
+        run.chat_history.append({"role": "assistant", "content": answer})
+        for tok in answer.split(" "):
+            yield json.dumps({"type": "chat_token", "payload": tok + " "})
+        yield json.dumps({"type": "chat_done"})
+
+    return EventSourceResponse(gen())
+
+
+@app.post("/steer/{run_id}")
+async def steer(run_id: str, body: SteerIn):
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "run not found")
+    if run.status != "running":
+        raise HTTPException(400, f"can only steer a running pipeline (status={run.status!r})")
+    run.inbox.append(body.message)
+    return {"queued": True, "position": len(run.inbox)}
 
 
 class LLMConfigIn(BaseModel):

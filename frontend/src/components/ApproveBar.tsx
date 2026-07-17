@@ -1,9 +1,9 @@
-import { ShieldCheck, Download, Check } from "lucide-react";
+import { ShieldCheck, Download, Check, ListTree } from "lucide-react";
 
 interface Props {
   exported: boolean;
   onApprove: () => void;
-  onDownload: (kind: "csv" | "sdf" | "report") => void;
+  onDownload: (kind: "csv" | "sdf" | "report" | "traces") => void;
 }
 
 export default function ApproveBar({ exported, onApprove, onDownload }: Props) {
@@ -34,6 +34,9 @@ export default function ApproveBar({ exported, onApprove, onDownload }: Props) {
             </button>
             <button className="btn" onClick={() => onDownload("report")}>
               <Download size={14} /> Report
+            </button>
+            <button className="btn" onClick={() => onDownload("traces")} title="Full tool-call trace, every agent, uncapped">
+              <ListTree size={14} /> Download traces
             </button>
           </>
         )}

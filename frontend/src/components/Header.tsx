@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { Hexagon } from "lucide-react";
 import type { RunStatus, LLMProvider, LLMOptions, LLMHealth } from "../types";
 import { getLLMConfig, setLLMConfig, getLLMHealth } from "../api";
+import { QUANTORI_LOGO } from "../brand";
 
 interface Props {
   mode: "mock" | "live";
   onMode: (m: "mock" | "live") => void;
   status: RunStatus;
   onHealthChange: (health: LLMHealth) => void;
+  onHome: () => void;
 }
 
 const STATUS_TEXT: Record<RunStatus, string> = {
@@ -25,13 +26,13 @@ const PROVIDER_LABEL: Record<LLMProvider, string> = {
 
 // Native <option> elements can only render plain text — no <img> inside a
 // dropdown list item — so the real logo is shown as a small badge in the
-// control bar instead, swapped based on the selected provider.
-const QUANTORI_LOGO = "https://avatars.githubusercontent.com/u/42839720?s=200&v=4";
+// control bar instead, swapped based on the selected provider. (Logo URL
+// now lives in ../brand — also reused by BrandSpinner for loading states.)
 
 const EMPTY_OPTIONS: LLMOptions = { ollama: [], gateway: [] };
 const EMPTY_HEALTH: LLMHealth = { status: "checking", ok: false, latency_ms: 0, error: null };
 
-export default function Header({ mode, onMode, status, onHealthChange }: Props) {
+export default function Header({ mode, onMode, status, onHealthChange, onHome }: Props) {
   const [provider, setProvider] = useState<LLMProvider>("ollama");
   const [model, setModel] = useState("");
   const [options, setOptions] = useState<LLMOptions>(EMPTY_OPTIONS);
@@ -193,15 +194,15 @@ export default function Header({ mode, onMode, status, onHealthChange }: Props) 
 
   return (
     <header className="hdr">
-      <div className="hdr-brand">
+      <button className="hdr-brand" onClick={onHome} title="Back to setup — start a new triage">
         <div className="hdr-mark">
-          <Hexagon size={18} strokeWidth={2.2} />
+          <img className="hdr-mark-logo" src={QUANTORI_LOGO} alt="" width={20} height={20} />
         </div>
         <div>
-          <div className="hdr-title">Target Triage Copilot</div>
+          <div className="hdr-title">Quantori Triage Copilot</div>
           <div className="hdr-sub">in-silico screening · triage, not oracle</div>
         </div>
-      </div>
+      </button>
 
       <div className="hdr-right">
         <div className="llm-ctl" title={demoLocked ? "Provider switching applies to LIVE runs." : undefined}>

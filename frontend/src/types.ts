@@ -72,6 +72,10 @@ export interface RunState {
   targetName: string;
   targetId: string;
   toolTrace: Record<AgentId, ToolCallEvent[]>;
+  // Same shape as toolTrace but never capped — toolTrace keeps only the last
+  // TRACE_CAP entries per agent for the live rail display; this is the full
+  // history, kept around solely for the "Download traces" export.
+  fullTrace: Record<AgentId, ToolCallEvent[]>;
 }
 
 // LLM provider layer (both providers are OpenAI-compatible; see backend/app/llm.py).
@@ -89,4 +93,30 @@ export interface LLMHealth {
   ok: boolean;
   latency_ms: number;
   error: string | null;
+}
+
+// Chat copilot — not a new agent, reuses run_tool_loop with chat_tools.py.
+export interface ChatToolCallDisplay {
+  tool: string;
+  args: Record<string, unknown>;
+  result_summary: string;
+  status: "ok" | "error" | "retry";
+}
+
+// A mutate tool (rerank/focus_scaffold) called without confirmed=true
+// returns one of these instead of applying anything.
+export interface ChatPreview {
+  toolName: string;
+  entering_top20?: string[];
+  leaving_top20?: string[];
+  message?: string;
+  [key: string]: unknown;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  toolCalls?: ChatToolCallDisplay[];
+  preview?: ChatPreview | null;
+  streaming?: boolean;
 }
