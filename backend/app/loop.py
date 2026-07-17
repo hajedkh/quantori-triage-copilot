@@ -30,6 +30,7 @@ async def run_tool_loop(
     executor: ToolExecutor,
     cfg=None,
     max_iters: int = 6,
+    force_tool_first: bool = True,
 ) -> str:
     """
     Run the LLM tool-calling loop for one agent, emitting events to the run's SSE
@@ -45,10 +46,18 @@ async def run_tool_loop(
     errored_tools: set = set()
 
     for iteration in range(1, max_iters + 1):
+        if run.inbox:
+            for msg in run.inbox:
+                messages.append({"role": "user", "content": f"Operator guidance: {msg}"})
+                emit(run, {"type": "steer", "agent": agent_name, "payload": msg})
+            run.inbox.clear()
+
         # Small local models sometimes narrate a plan in prose instead of
         # calling a tool on the first turn. Force real action on iteration 1;
         # after that, let the model decide when it's actually done.
-        tool_choice = "required" if iteration == 1 else "auto"
+        # force_tool_first=False (chat only, always a capable gateway model)
+        # skips this forced round-trip so simple turns can resolve in one call.
+        tool_choice = "required" if (iteration == 1 and force_tool_first) else "auto"
         try:
             resp = await llm_module.chat(
                 messages=messages, tools=tools, cfg=cfg, tool_choice=tool_choice

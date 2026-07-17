@@ -142,14 +142,23 @@ async def chat(
 
 
 async def health(cfg: LLMConfig | None = None) -> dict:
-    """1-token ping against the given (or active) provider. Never raises."""
+    """Ping against the given (or active) provider. Never raises.
+
+    max_tokens=50, not 1: reasoning models (e.g. gpt-5) can spend an
+    unbounded number of hidden "reasoning tokens" before any visible output,
+    and some gateways hard-reject the request with a 400 ("could not finish
+    the message") if max_tokens is too small to even start that — 1 token
+    reliably triggers it. 50 is enough headroom for every model tested
+    (reasoning or not) to at least complete without erroring, which is what
+    "is this provider reachable" should actually mean here.
+    """
     cfg = cfg or get_active_config()
     start = time.monotonic()
     try:
         await chat(
             messages=[{"role": "user", "content": "hi"}],
             cfg=cfg,
-            max_tokens=1,
+            max_tokens=50,
             timeout=8.0,
         )
         return {
