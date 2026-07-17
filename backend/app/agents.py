@@ -84,7 +84,7 @@ async def cheminformatics(run):
     async def executor(name, args):
         return await tools.execute_tool(run, name, args)
 
-    cfg = llm.load_config("ollama")  # high call volume, cheap, self-hosted
+    cfg = llm.get_active_config()  # whatever provider/model is selected in the UI
     summary = await loop.run_tool_loop(
         run, "cheminformatics", system_prompt, user_msg, tools.CHEM_TOOLS, executor, cfg=cfg
     )
@@ -146,7 +146,7 @@ async def critic(run):
     async def executor(name, args):
         return await tools.execute_tool(run, name, args)
 
-    cfg = llm.load_config("gateway")  # one call, quality matters — cost-routing story
+    cfg = llm.get_active_config()  # whatever provider/model is selected in the UI
 
     raw = await loop.run_tool_loop(
         run, "critic", system_prompt, user_msg, tools.CRITIC_TOOLS, executor, cfg=cfg
