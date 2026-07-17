@@ -1,62 +1,197 @@
-"""Export writers — CSV, SDF, and a Markdown report with the dossier + citations."""
+"""Export writers — CSV, SDF, and a Markdown report with the dossier + citations.
+
+The CSV is the primary downstream artifact for cheminformatics triage.
+It includes the full Lipinski Ro5 breakdown, extended ADME descriptors,
+structural keys (InChIKey, Murcko scaffold), and scoring provenance,
+all computed fresh from the ranked SMILES at export time.
+"""
 
 from __future__ import annotations
 import csv
 from pathlib import Path
 from rdkit import Chem
 
+# Import chem for extended_descriptors — resolve relative or absolute
+try:
+    from . import chem
+except ImportError:
+    import chem  # type: ignore
+
+
+# ---- Column groups for the comprehensive CSV ----
+# Ordered for a med-chem triager: ranking context first, then Lipinski,
+# then extended properties, then structural/provenance.
+
+_CSV_COLUMNS = [
+    # --- Ranking ---
+    "rank",
+    "smiles",
+    "score",
+    "confidence",
+    # --- Similarity ---
+    "nearest_active",
+    "max_similarity",
+    # --- Lipinski Ro5 ---
+    "mw",
+    "logp",
+    "hbd",
+    "hba",
+    "n_lipinski_violations",
+    "lipinski_violations",
+    # --- Extended ADME ---
+    "tpsa",
+    "rotatable_bonds",
+    "molar_refractivity",
+    # --- Drug-likeness ---
+    "qed",
+    "sa_score",
+    # --- Complexity ---
+    "heavy_atoms",
+    "fraction_csp3",
+    # --- Ring systems ---
+    "n_rings",
+    "n_aromatic_rings",
+    "n_heteroatoms",
+    # --- Charge ---
+    "formal_charge",
+    # --- PAINS ---
+    "n_pains_alerts",
+    "pains_alerts",
+    # --- Structural ---
+    "scaffold",
+    "molecular_formula",
+    "inchikey",
+    # --- Provenance ---
+    "is_known_active",
+    "reason",
+    "evidence_used",
+]
+
+
+def _enrich_row(r: dict) -> dict:
+    """Merge ranking data with freshly-computed extended descriptors.
+
+    The ranked list carries SMILES + scoring fields; extended_descriptors
+    recomputes the full property set from the SMILES. This runs on the
+    final shortlist (<=600 compounds) so the cost is trivial.
+    """
+    mol = chem.parse(r["smiles"])
+    if mol is None:
+        return {col: "" for col in _CSV_COLUMNS}
+
+    ext = chem.extended_descriptors(mol)
+
+    # Lipinski violations against default thresholds
+    lip_v = chem.lipinski_violations(
+        {"mw": ext["mw"], "logp": ext["logp"], "hbd": ext["hbd"], "hba": ext["hba"]}
+    )
+
+    return {
+        # ranking
+        "rank": r.get("rank", ""),
+        "smiles": r["smiles"],
+        "score": r.get("score", ""),
+        "confidence": r.get("confidence", ""),
+        # similarity
+        "nearest_active": r.get("nearest_active", ""),
+        "max_similarity": r.get("max_similarity", ""),
+        # Lipinski Ro5
+        "mw": ext["mw"],
+        "logp": ext["logp"],
+        "hbd": ext["hbd"],
+        "hba": ext["hba"],
+        "n_lipinski_violations": len(lip_v),
+        "lipinski_violations": "; ".join(lip_v) if lip_v else "",
+        # extended ADME
+        "tpsa": ext["tpsa"],
+        "rotatable_bonds": ext["rotatable_bonds"],
+        "molar_refractivity": ext["molar_refractivity"],
+        # drug-likeness
+        "qed": ext["qed"] if ext["qed"] is not None else "",
+        "sa_score": ext["sa_score"] if ext["sa_score"] is not None else "",
+        # complexity
+        "heavy_atoms": ext["heavy_atoms"],
+        "fraction_csp3": ext["fraction_csp3"],
+        # ring systems
+        "n_rings": ext["n_rings"],
+        "n_aromatic_rings": ext["n_aromatic_rings"],
+        "n_heteroatoms": ext["n_heteroatoms"],
+        # charge
+        "formal_charge": ext["formal_charge"],
+        # PAINS
+        "n_pains_alerts": ext["n_pains_alerts"],
+        "pains_alerts": ext["pains_alerts"],
+        # structural
+        "scaffold": ext["scaffold"],
+        "molecular_formula": ext["molecular_formula"],
+        "inchikey": ext["inchikey"],
+        # provenance
+        "is_known_active": r.get("is_known_active", ""),
+        "reason": r.get("reason", ""),
+        "evidence_used": (
+            "; ".join(r.get("evidence_used", [])) if r.get("evidence_used") else ""
+        ),
+    }
+
 
 def write_csv(path: Path, ranked: list[dict]) -> None:
+    """Write the comprehensive triage CSV with full cheminformatics data."""
     with open(path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(
-            [
-                "rank",
-                "smiles",
-                "score",
-                "confidence",
-                "nearest_active",
-                "max_similarity",
-                "scaffold",
-                "sa_score",
-                "reason",
-                "evidence_used",
-            ]
-        )
+        w = csv.DictWriter(f, fieldnames=_CSV_COLUMNS, extrasaction="ignore")
+        w.writeheader()
         for r in ranked:
-            evidence = (
-                "; ".join(r.get("evidence_used", [])) if r.get("evidence_used") else ""
-            )
-            w.writerow(
-                [
-                    r["rank"],
-                    r["smiles"],
-                    r["score"],
-                    r["confidence"],
-                    r["nearest_active"],
-                    r["max_similarity"],
-                    r.get("scaffold", ""),
-                    r.get("sa_score", ""),
-                    r["reason"],
-                    evidence,
-                ]
-            )
+            w.writerow(_enrich_row(r))
 
 
 def write_sdf(path: Path, ranked: list[dict]) -> None:
+    """Write SDF with all computed properties as mol fields."""
     w = Chem.SDWriter(str(path))
     for r in ranked:
-        mol = Chem.MolFromSmiles(r["smiles"])
+        mol = chem.parse(r["smiles"])
         if mol is None:
             continue
-        mol.SetProp("rank", str(r["rank"]))
+
+        ext = chem.extended_descriptors(mol)
+
+        # Ranking fields
+        mol.SetProp("rank", str(r.get("rank", "")))
         mol.SetProp("score", f'{r["score"]:.3f}')
-        mol.SetProp("confidence", r["confidence"])
-        mol.SetProp("nearest_active", str(r["nearest_active"]))
-        if r.get("scaffold"):
-            mol.SetProp("scaffold", r["scaffold"])
-        if r.get("sa_score") is not None:
-            mol.SetProp("sa_score", f'{r["sa_score"]:.3f}')
+        mol.SetProp("confidence", r.get("confidence", ""))
+        mol.SetProp("nearest_active", str(r.get("nearest_active", "")))
+
+        # Numeric descriptors
+        for key in [
+            "mw",
+            "logp",
+            "hbd",
+            "hba",
+            "tpsa",
+            "rotatable_bonds",
+            "molar_refractivity",
+            "heavy_atoms",
+            "fraction_csp3",
+            "n_rings",
+            "n_aromatic_rings",
+            "n_heteroatoms",
+            "formal_charge",
+            "n_pains_alerts",
+        ]:
+            val = ext.get(key)
+            if val is not None:
+                mol.SetProp(key, str(val))
+
+        # Float descriptors with precision
+        for key in ["qed", "sa_score"]:
+            val = ext.get(key)
+            if val is not None:
+                mol.SetProp(key, f"{val:.3f}")
+
+        # String descriptors
+        for key in ["scaffold", "molecular_formula", "inchikey", "pains_alerts"]:
+            val = ext.get(key)
+            if val:
+                mol.SetProp(key, val)
+
         w.write(mol)
     w.close()
 

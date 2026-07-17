@@ -21,7 +21,8 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 # SA Score lives in rdkit.Contrib — path varies by installation.
 try:
     from rdkit.Chem import RDConfig
-    import os as _os, sys as _sys
+    import os as _os
+    import sys as _sys
 
     _sys.path.append(_os.path.join(RDConfig.RDContribDir, "SA_Score"))
     from sascorer import calculateScore as _sa_raw  # type: ignore
@@ -61,6 +62,100 @@ def descriptors(mol) -> dict:
         "logp": round(Descriptors.MolLogP(mol), 2),
         "hbd": Descriptors.NumHDonors(mol),
         "hba": Descriptors.NumHAcceptors(mol),
+    }
+
+
+def extended_descriptors(mol) -> dict:
+    """Comprehensive descriptor set for export. Computes everything a med-chem
+    triager would want in a single pass over the mol object.
+
+    Groups: identity, Lipinski Ro5, extended ADME-relevant, complexity,
+    ring systems, charge, and structural keys.
+    """
+    from rdkit.Chem import rdMolDescriptors, Crippen, Lipinski
+    from rdkit.Chem import inchi as inchi_mod
+
+    smi = Chem.MolToSmiles(mol)
+
+    # ---- Identity ----
+    try:
+        inchi_str = inchi_mod.MolToInchi(mol) or ""
+        inchikey = inchi_mod.InchiToInchiKey(inchi_str) if inchi_str else ""
+    except Exception:
+        inchi_str, inchikey = "", ""
+
+    formula = rdMolDescriptors.CalcMolFormula(mol)
+
+    # ---- Lipinski Ro5 ----
+    mw = round(Descriptors.MolWt(mol), 2)
+    logp = round(Crippen.MolLogP(mol), 3)
+    hbd = Descriptors.NumHDonors(mol)
+    hba = Descriptors.NumHAcceptors(mol)
+
+    # ---- Extended ADME-relevant ----
+    tpsa = round(Descriptors.TPSA(mol), 2)
+    rotatable_bonds = Lipinski.NumRotatableBonds(mol)
+    molar_refractivity = round(Crippen.MolMR(mol), 2)
+
+    # ---- Drug-likeness scores ----
+    try:
+        qed_val = round(QED.qed(mol), 3)
+    except Exception:
+        qed_val = None
+
+    sa = sa_score(mol)
+
+    # ---- Complexity / size ----
+    heavy_atoms = mol.GetNumHeavyAtoms()
+    fraction_csp3 = round(Descriptors.FractionCSP3(mol), 3)
+
+    # ---- Ring systems ----
+    ring_info = mol.GetRingInfo()
+    n_rings = ring_info.NumRings()
+    n_aromatic_rings = Descriptors.NumAromaticRings(mol)
+    n_heteroatoms = Descriptors.NumHeteroatoms(mol)
+
+    # ---- Charge ----
+    formal_charge = Chem.GetFormalCharge(mol)
+
+    # ---- PAINS ----
+    alerts = pains_flag(mol)
+
+    # ---- Scaffold ----
+    skey = scaffold_key(mol)
+
+    return {
+        # identity
+        "smiles": smi,
+        "inchi": inchi_str,
+        "inchikey": inchikey,
+        "molecular_formula": formula,
+        # Lipinski Ro5
+        "mw": mw,
+        "logp": logp,
+        "hbd": hbd,
+        "hba": hba,
+        # extended ADME
+        "tpsa": tpsa,
+        "rotatable_bonds": rotatable_bonds,
+        "molar_refractivity": molar_refractivity,
+        # drug-likeness
+        "qed": qed_val,
+        "sa_score": sa,
+        # complexity
+        "heavy_atoms": heavy_atoms,
+        "fraction_csp3": fraction_csp3,
+        # ring systems
+        "n_rings": n_rings,
+        "n_aromatic_rings": n_aromatic_rings,
+        "n_heteroatoms": n_heteroatoms,
+        # charge
+        "formal_charge": formal_charge,
+        # PAINS
+        "n_pains_alerts": len(alerts),
+        "pains_alerts": "; ".join(alerts) if alerts else "",
+        # scaffold
+        "scaffold": skey,
     }
 
 

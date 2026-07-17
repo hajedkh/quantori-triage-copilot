@@ -80,7 +80,8 @@ async def knowledge(run):
             {
                 "type": "log",
                 "agent": "knowledge",
-                "payload": f"Warning: {len(grounding['ungrounded'])} citation(s) could not be grounded to provided sources.",
+                "payload": f"Warning: {len(grounding['ungrounded'])} citation(s) could not be grounded to "
+                + "provided sources.",
             },
         )
     # stream the dossier word by word — the text already exists in full,
