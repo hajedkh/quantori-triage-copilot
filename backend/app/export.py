@@ -17,6 +17,8 @@ def write_csv(path: Path, ranked: list[dict]) -> None:
                 "confidence",
                 "nearest_active",
                 "max_similarity",
+                "scaffold",
+                "sa_score",
                 "reason",
                 "evidence_used",
             ]
@@ -33,6 +35,8 @@ def write_csv(path: Path, ranked: list[dict]) -> None:
                     r["confidence"],
                     r["nearest_active"],
                     r["max_similarity"],
+                    r.get("scaffold", ""),
+                    r.get("sa_score", ""),
                     r["reason"],
                     evidence,
                 ]
@@ -49,6 +53,10 @@ def write_sdf(path: Path, ranked: list[dict]) -> None:
         mol.SetProp("score", f'{r["score"]:.3f}')
         mol.SetProp("confidence", r["confidence"])
         mol.SetProp("nearest_active", str(r["nearest_active"]))
+        if r.get("scaffold"):
+            mol.SetProp("scaffold", r["scaffold"])
+        if r.get("sa_score") is not None:
+            mol.SetProp("sa_score", f'{r["sa_score"]:.3f}')
         w.write(mol)
     w.close()
 

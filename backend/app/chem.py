@@ -16,6 +16,17 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Descriptors, AllChem, DataStructs, QED
 from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
+from rdkit.Chem.Scaffolds import MurckoScaffold
+
+# SA Score lives in rdkit.Contrib — path varies by installation.
+try:
+    from rdkit.Chem import RDConfig
+    import os as _os, sys as _sys
+
+    _sys.path.append(_os.path.join(RDConfig.RDContribDir, "SA_Score"))
+    from sascorer import calculateScore as _sa_raw  # type: ignore
+except Exception:
+    _sa_raw = None
 
 RDLogger.DisableLog("rdApp.*")  # quiet parse warnings
 
@@ -26,9 +37,6 @@ _PAINS = FilterCatalog(_pains_params)
 
 # Minimum candidate count before spawning a pool is worthwhile.
 _PARALLEL_THRESHOLD = 500
-# Small batches give good load balancing (fast workers get the next batch
-# immediately via as_completed) without excessive IPC overhead.
-_BATCH_SIZE = 128
 
 # ---- Worker-process state (set by _init_worker, used by _process_one) ----
 _w_active_fps: list = []
@@ -115,6 +123,51 @@ def max_tanimoto(fp, active_fps: list) -> tuple[float, int]:
     return round(sims[best], 3), best
 
 
+def similarity_profile(fp, active_fps: list, top_k: int = 3) -> dict:
+    """Richer similarity signal than max-only.
+
+    Returns {max_sim, max_idx, top_k_avg, n_above_03} where:
+    - max_sim / max_idx: best Tanimoto and which active
+    - top_k_avg: mean of the top-k similarities (breadth signal)
+    - n_above_03: count of actives with Tanimoto >= 0.3 (coverage)
+    """
+    if not active_fps:
+        return {"max_sim": 0.0, "max_idx": -1, "top_k_avg": 0.0, "n_above_03": 0}
+    sims = DataStructs.BulkTanimotoSimilarity(fp, active_fps)
+    sorted_sims = sorted(sims, reverse=True)
+    best_idx = max(range(len(sims)), key=lambda i: sims[i])
+    top_k_vals = sorted_sims[: min(top_k, len(sorted_sims))]
+    return {
+        "max_sim": round(sorted_sims[0], 3),
+        "max_idx": best_idx,
+        "top_k_avg": round(sum(top_k_vals) / len(top_k_vals), 3),
+        "n_above_03": sum(1 for s in sims if s >= 0.3),
+    }
+
+
+def sa_score(mol) -> float | None:
+    """Synthetic accessibility score (Ertl & Schuffenhauer).
+    Returns 0.0 (easy) to 1.0 (hard), normalized from the raw 1-10 scale.
+    None if SA scorer is unavailable."""
+    if _sa_raw is None:
+        return None
+    try:
+        raw = _sa_raw(mol)  # 1 (easy) – 10 (hard)
+        return round((raw - 1.0) / 9.0, 3)  # normalize to 0–1
+    except Exception:
+        return None
+
+
+def scaffold_key(mol) -> str:
+    """Bemis-Murcko generic framework as SMILES. Used for diversity clustering."""
+    try:
+        core = MurckoScaffold.GetScaffoldForMol(mol)
+        generic = MurckoScaffold.MakeScaffoldGeneric(core)
+        return Chem.MolToSmiles(generic)
+    except Exception:
+        return Chem.MolToSmiles(mol)
+
+
 def build_active_fps(active_smiles: list[str]):
     fps, ids = [], []
     for i, s in enumerate(active_smiles):
@@ -154,7 +207,8 @@ def screen(
         if alerts:
             n_pains += 1
             continue
-        sim, idx = max_tanimoto(fingerprint(mol), active_fps)
+        fp = fingerprint(mol)
+        sim_prof = similarity_profile(fp, active_fps)
         qed_error = False
         try:
             qed = round(QED.qed(mol), 3)
@@ -169,12 +223,19 @@ def screen(
                 **d,
                 "qed": qed,
                 "qed_error": qed_error,
+                "sa_score": sa_score(mol),
+                "scaffold": scaffold_key(mol),
                 "lipinski_pass": True,
                 "lipinski_violations": violations,
                 "pains_flag": False,
                 "pains_alerts": [],
-                "max_similarity": sim,
-                "nearest_active": f"active#{idx}" if idx >= 0 else "-",
+                "n_pains_alerts": 0,
+                "max_similarity": sim_prof["max_sim"],
+                "top_k_avg": sim_prof["top_k_avg"],
+                "n_actives_above_03": sim_prof["n_above_03"],
+                "nearest_active": (
+                    f"active#{sim_prof['max_idx']}" if sim_prof["max_idx"] >= 0 else "-"
+                ),
             }
         )
 
@@ -227,13 +288,17 @@ def _process_one(work_item: tuple[dict, dict]) -> dict:
     if t["apply_pains"] and alerts:
         return {"status": "pains_dropped"}
 
-    sim, idx = max_tanimoto(fingerprint(mol), _w_active_fps)
+    fp = fingerprint(mol)
+    sim_prof = similarity_profile(fp, _w_active_fps)
 
     qed_val, qed_error = None, False
     try:
         qed_val = round(QED.qed(mol), 3)
     except Exception:
         qed_error = True
+
+    sa = sa_score(mol)
+    skey = scaffold_key(mol)
 
     return {
         "status": "survivor",
@@ -242,12 +307,19 @@ def _process_one(work_item: tuple[dict, dict]) -> dict:
         **d,
         "qed": qed_val,
         "qed_error": qed_error,
+        "sa_score": sa,
+        "scaffold": skey,
         "lipinski_pass": True,
         "lipinski_violations": violations,
         "pains_flag": bool(alerts),
         "pains_alerts": alerts,
-        "max_similarity": sim,
-        "nearest_active": f"active#{idx}" if idx >= 0 else "-",
+        "n_pains_alerts": len(alerts),
+        "max_similarity": sim_prof["max_sim"],
+        "top_k_avg": sim_prof["top_k_avg"],
+        "n_actives_above_03": sim_prof["n_above_03"],
+        "nearest_active": (
+            f"active#{sim_prof['max_idx']}" if sim_prof["max_idx"] >= 0 else "-"
+        ),
     }
 
 
@@ -289,6 +361,11 @@ def _aggregate(results: list[dict]) -> tuple[list[dict], dict, list[str]]:
         "survivors": len(survivors),
     }
     return survivors, stats, invalid_examples
+
+
+# Small batches give good load balancing (fast workers get the next batch
+# immediately via as_completed) without excessive IPC overhead.
+_BATCH_SIZE = 64
 
 
 class ScreenPool:
@@ -380,12 +457,131 @@ def screen_parallel(
         one_shot.shutdown()
 
 
-def _confidence(sim: float, lip: bool) -> str:
-    if sim >= 0.60 and lip:
+def _confidence(score: float, sim: float, lipinski_pass: bool) -> str:
+    """Confidence bucket using BOTH the composite score and similarity.
+    Score and confidence now agree — a High compound always outscores a Medium."""
+    if score >= 0.55 and sim >= 0.50 and lipinski_pass:
         return "High"
-    if sim >= 0.30:
+    if score >= 0.30 and sim >= 0.25:
         return "Medium"
     return "Low"
+
+
+# ---- Default scoring weights ----
+DEFAULT_WEIGHTS = {
+    "similarity": 0.40,  # max Tanimoto to nearest active
+    "breadth": 0.15,  # top-k average (multi-active coverage)
+    "qed": 0.20,  # drug-likeness
+    "sa": 0.15,  # synthetic accessibility (inverted: easy = high)
+    "penalty_lipinski": 0.05,  # per violation
+    "penalty_pains": 0.03,  # per PAINS alert (graduated, not binary)
+}
+
+
+def compute_score(s: dict, weights: dict | None = None) -> float:
+    """Compute the composite triage score for a survivor dict.
+
+    score = w_sim × max_similarity
+          + w_breadth × top_k_avg
+          + w_qed × QED
+          + w_sa × (1 - SA_norm)           # lower SA = easier = better
+          - penalty_lipinski × n_violations
+          - penalty_pains × n_alerts
+    """
+    w = {**DEFAULT_WEIGHTS, **(weights or {})}
+
+    sim = s["max_similarity"]
+    breadth = s.get("top_k_avg", sim)  # fallback to max if profile missing
+    qed = s["qed"] if s.get("qed") is not None else 0.0
+    sa = s.get("sa_score")
+    sa_term = (1.0 - sa) if sa is not None else 0.5  # neutral if unavailable
+    n_viol = len(s.get("lipinski_violations", []))
+    n_pains = s.get("n_pains_alerts", 1 if s.get("pains_flag") else 0)
+
+    raw = (
+        w["similarity"] * sim
+        + w["breadth"] * breadth
+        + w["qed"] * qed
+        + w["sa"] * sa_term
+        - w["penalty_lipinski"] * n_viol
+        - w["penalty_pains"] * n_pains
+    )
+    return round(max(0.0, min(raw, 1.0)), 3)
+
+
+def _build_reason(s: dict, score: float, nearest_id: str) -> str:
+    """Human-readable rationale string for a ranked compound."""
+    sim = s["max_similarity"]
+    parts = [f"{sim:.2f} Tanimoto to {nearest_id}"]
+
+    breadth = s.get("top_k_avg")
+    n_above = s.get("n_actives_above_03", 0)
+    if breadth is not None and breadth != sim:
+        parts.append(f"top-3 avg {breadth:.2f}")
+    if n_above > 1:
+        parts.append(f"similar to {n_above} actives")
+
+    lip_v = s.get("lipinski_violations", [])
+    if lip_v:
+        parts.append(f"Lipinski: {len(lip_v)} violation(s)")
+    else:
+        parts.append("passes Lipinski")
+
+    sa = s.get("sa_score")
+    if sa is not None:
+        ease = "easy" if sa < 0.33 else ("moderate" if sa < 0.66 else "hard")
+        parts.append(f"SA: {ease} ({1 - sa:.2f})")
+
+    n_pains = s.get("n_pains_alerts", 0)
+    if n_pains:
+        parts.append(f"{n_pains} PAINS alert(s)")
+
+    if s.get("qed_error"):
+        parts.append("QED unavailable")
+
+    return "; ".join(parts) + "."
+
+
+def diversity_rerank(scored: list[dict], top_n: int) -> list[dict]:
+    """Scaffold-aware greedy pick to ensure chemotype diversity.
+
+    Walks the score-sorted list and picks the next highest-scoring compound
+    whose Bemis-Murcko scaffold hasn't been seen more than `max_per_scaffold`
+    times. This prevents the top-N from being dominated by analogs of one
+    active, while still respecting the score ordering within each scaffold.
+    """
+    if not scored:
+        return []
+
+    # Allow more representatives from high-scoring scaffolds, but cap
+    n_scaffolds_est = len({s.get("scaffold", s["smiles"]) for s in scored})
+    if n_scaffolds_est > 0:
+        max_per = max(3, top_n // max(1, n_scaffolds_est))
+    else:
+        max_per = max(3, top_n // 10)
+
+    scaffold_counts: dict[str, int] = {}
+    picked: list[dict] = []
+
+    for s in scored:
+        if len(picked) >= top_n:
+            break
+        skey = s.get("scaffold", s["smiles"])
+        count = scaffold_counts.get(skey, 0)
+        if count < max_per:
+            scaffold_counts[skey] = count + 1
+            picked.append(s)
+
+    # If we couldn't fill top_n due to diversity caps, backfill from skipped
+    if len(picked) < top_n:
+        picked_smiles = {p["smiles"] for p in picked}
+        for s in scored:
+            if len(picked) >= top_n:
+                break
+            if s["smiles"] not in picked_smiles:
+                picked.append(s)
+
+    return picked
 
 
 def canonical(smiles: str) -> str | None:
@@ -400,20 +596,17 @@ def rank(
     survivors: list[dict],
     active_chembl_ids: list[str],
     top_n: int = 600,
-    w_sim: float = 0.6,
-    w_qed: float = 0.3,
-    w_pains: float = 0.1,
+    weights: dict | None = None,
+    diversity: bool = True,
 ) -> list[dict]:
-    """Score, bucket confidence, drop Low, sort, take top_n, assign ranks."""
+    """Score, bucket confidence, drop Low, diversity-rerank, assign ranks."""
     scored = []
     for s in survivors:
+        score = compute_score(s, weights)
         sim = s["max_similarity"]
-        qed = s["qed"] if s.get("qed") is not None else 0.0
-        score = w_sim * sim + w_qed * qed + w_pains * (0.0 if s["pains_flag"] else 1.0)
-        conf = _confidence(sim, s["lipinski_pass"])
+        conf = _confidence(score, sim, s["lipinski_pass"])
         if conf == "Low":
             continue
-        # map nearest active index -> a chembl-ish id for display
         idx = (
             int(s["nearest_active"].split("#")[-1])
             if "#" in s["nearest_active"]
@@ -424,24 +617,16 @@ def rank(
             if 0 <= idx < len(active_chembl_ids)
             else s["nearest_active"]
         )
-        qed_note = " (QED unavailable)" if s.get("qed_error") else ""
-        reason = (
-            f"{sim:.2f} Tanimoto to {nearest} (known active); "
-            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski"
-        )
-        if s.get("lipinski_violations"):
-            reason += f" ({len(s['lipinski_violations'])} violation(s))"
-        reason += (
-            f"; {'no PAINS' if not s['pains_flag'] else 'PAINS flagged'}{qed_note}."
-        )
         scored.append(
             {
                 "smiles": s["smiles"],
-                "score": round(min(score, 0.99), 3),
+                "score": score,
                 "confidence": conf,
-                "reason": reason,
+                "reason": _build_reason(s, score, nearest),
                 "nearest_active": nearest,
                 "max_similarity": sim,
+                "scaffold": s.get("scaffold", ""),
+                "sa_score": s.get("sa_score"),
                 "is_known_active": (
                     bool(s.get("label")) if s.get("label") is not None else False
                 ),
@@ -449,7 +634,12 @@ def rank(
         )
 
     scored.sort(key=lambda r: r["score"], reverse=True)
-    top = scored[:top_n]
+
+    if diversity:
+        top = diversity_rerank(scored, top_n)
+    else:
+        top = scored[:top_n]
+
     for i, r in enumerate(top, 1):
         r["rank"] = i
     return top

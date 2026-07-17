@@ -80,8 +80,7 @@ async def knowledge(run):
             {
                 "type": "log",
                 "agent": "knowledge",
-                "payload": f"Warning: {len(grounding['ungrounded'])} citation(s) could not be grounded"
-                + " to provided sources.",
+                "payload": f"Warning: {len(grounding['ungrounded'])} citation(s) could not be grounded to provided sources.",
             },
         )
     # stream the dossier word by word — the text already exists in full,
@@ -185,13 +184,20 @@ async def critic(run):
         "Survivors from the Cheminformatics agent's filtering are ready to be "
         "scored and ranked. You MUST fetch evidence with your tools before "
         "scoring — never score blind.\n\n"
+        "The scoring formula has six components you can weight:\n"
+        "- similarity (default 0.40): max Tanimoto to nearest known active\n"
+        "- breadth (default 0.15): top-3 average Tanimoto (rewards multi-active coverage)\n"
+        "- qed (default 0.20): drug-likeness composite\n"
+        "- sa (default 0.15): synthetic accessibility (inverted: easy to make = high score)\n"
+        "- penalty_lipinski (default 0.05): deducted per Ro5 violation\n"
+        "- penalty_pains (default 0.03): deducted per PAINS alert\n\n"
+        "After scoring, diversity reranking clusters by Bemis-Murcko scaffold "
+        "so the top-N covers distinct chemotypes. You can disable this.\n\n"
         "Workflow:\n"
         "1. Call get_funnel_stats to understand what the cheminformatics agent did.\n"
         "2. Spot-check a few survivors with compute_descriptors to verify quality.\n"
-        "3. Choose score weights (similarity / QED / PAINS-clean) you can "
-        "justify for this target class, then call rank_survivors to produce "
-        "the final ranking. The numeric scores are computed by RDKit — you "
-        "choose weights and write the explanation.\n"
+        "3. Choose weights you can justify for this target class, then call "
+        "rank_survivors. The numeric scores are computed by RDKit.\n"
         "4. Call submit_ranking with per-compound evidence notes listing which "
         "tool results backed your judgment. Use canonical SMILES exactly as "
         "they appear in the rank_survivors output. Set yield_ok=false only if "

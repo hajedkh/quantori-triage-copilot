@@ -33,8 +33,7 @@ def screen_candidates_schema() -> dict:
         "type": "function",
         "function": {
             "name": "screen_candidates",
-            "description": "Filter the candidate library by drug-likeness/PAINS and score survivors by "
-            + "similarity to known actives.",
+            "description": "Filter the candidate library by drug-likeness/PAINS and score survivors by similarity to known actives.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -116,7 +115,7 @@ def rank_survivors_schema() -> dict:
         "type": "function",
         "function": {
             "name": "rank_survivors",
-            "description": "Score and rank the current survivors into the final shortlist using your chosen weights.",
+            "description": "Score and rank survivors into the final shortlist. Uses similarity, breadth, QED, SA, and graduated penalties.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -124,13 +123,20 @@ def rank_survivors_schema() -> dict:
                         "type": "integer",
                         "description": "Max results to keep. Default 600.",
                     },
+                    "diversity": {
+                        "type": "boolean",
+                        "description": "Scaffold-aware diversity reranking. Default true.",
+                    },
                     "weights": {
                         "type": "object",
-                        "description": "similarity/qed/pains weights. Defaults 0.6/0.3/0.1.",
+                        "description": "Score component weights. Defaults: similarity 0.40, breadth 0.15, qed 0.20, sa 0.15, penalty_lipinski 0.05/violation, penalty_pains 0.03/alert.",
                         "properties": {
                             "similarity": {"type": "number"},
+                            "breadth": {"type": "number"},
                             "qed": {"type": "number"},
-                            "pains": {"type": "number"},
+                            "sa": {"type": "number"},
+                            "penalty_lipinski": {"type": "number"},
+                            "penalty_pains": {"type": "number"},
                         },
                     },
                 },
@@ -156,8 +162,7 @@ def submit_ranking_schema() -> dict:
         "type": "function",
         "function": {
             "name": "submit_ranking",
-            "description": "Submit the final ranked shortlist with per-compound evidence notes. Call "
-            + "AFTER rank_survivors.",
+            "description": "Submit the final ranked shortlist with per-compound evidence notes. Call AFTER rank_survivors.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -330,22 +335,19 @@ def _similarity_to_actives(run, smiles_list: list) -> dict:
     return {"count": len(results), "results": results}
 
 
-def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
-    weights = weights or {}
-    w_sim = weights.get("similarity", 0.6)
-    w_qed = weights.get("qed", 0.3)
-    w_pains = weights.get("pains", 0.1)
+def _rank_survivors(
+    run, top_n: int = 600, weights: dict = None, diversity: bool = True
+) -> dict:
+    w = {**chem.DEFAULT_WEIGHTS, **(weights or {})}
 
     survivors = run.survivors
     active_ids = run.active_ids
+
     scored = []
     for s in survivors:
+        score = chem.compute_score(s, w)
         sim = s["max_similarity"]
-        qed = s["qed"] if s.get("qed") is not None else 0.0
-        score = (
-            w_sim * sim + w_qed * qed + w_pains * (0.0 if s.get("pains_flag") else 1.0)
-        )
-        conf = chem._confidence(sim, s["lipinski_pass"])
+        conf = chem._confidence(score, sim, s["lipinski_pass"])
         if conf == "Low":
             continue
         idx = (
@@ -354,25 +356,16 @@ def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
             else -1
         )
         nearest = active_ids[idx] if 0 <= idx < len(active_ids) else s["nearest_active"]
-        qed_note = " (QED unavailable)" if s.get("qed_error") else ""
-        reason = (
-            f"{sim:.2f} Tanimoto to {nearest} (known active); "
-            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski"
-        )
-        if s.get("lipinski_violations"):
-            reason += f" ({len(s['lipinski_violations'])} violation(s))"
-        reason += (
-            f"; {'no PAINS' if not s.get('pains_flag') else 'PAINS flagged'}{qed_note}."
-        )
-        # SMILES are already canonical from screen_parallel / _process_one
         scored.append(
             {
                 "smiles": s["smiles"],
-                "score": round(min(score, 0.99), 3),
+                "score": score,
                 "confidence": conf,
-                "reason": reason,
+                "reason": chem._build_reason(s, score, nearest),
                 "nearest_active": nearest,
                 "max_similarity": sim,
+                "scaffold": s.get("scaffold", ""),
+                "sa_score": s.get("sa_score"),
                 "is_known_active": (
                     bool(s.get("label")) if s.get("label") is not None else False
                 ),
@@ -380,7 +373,12 @@ def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
         )
 
     scored.sort(key=lambda r: r["score"], reverse=True)
-    top = scored[:top_n]
+
+    if diversity:
+        top = chem.diversity_rerank(scored, top_n)
+    else:
+        top = scored[:top_n]
+
     for i, r in enumerate(top, 1):
         r["rank"] = i
 
@@ -396,9 +394,12 @@ def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
     )
 
     scores = [r["score"] for r in top]
+    n_scaffolds = len({r.get("scaffold", "") for r in top})
     return {
-        "weights_used": {"similarity": w_sim, "qed": w_qed, "pains": w_pains},
+        "weights_used": w,
+        "diversity_enabled": diversity,
         "ranked_count": len(top),
+        "unique_scaffolds": n_scaffolds,
         "score_range": [min(scores), max(scores)] if scores else [None, None],
         "top_examples": top[:_MAX_EXAMPLES],
     }
