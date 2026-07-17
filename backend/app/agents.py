@@ -10,8 +10,6 @@ functions with no scripted delays.
 """
 
 from __future__ import annotations
-import json
-import re
 from . import chem, sources, llm, tools, loop
 from .store import emit
 
@@ -72,9 +70,19 @@ async def knowledge(run):
             "payload": f"Retrieved {len(abstracts)} abstracts · writing cited dossier…",
         },
     )
-    dossier, citations = await llm.build_dossier(run.target_name, abstracts)
+    dossier, citations, grounding = await llm.build_dossier(run.target_name, abstracts)
     run.dossier = dossier
     run.citations = citations
+    run.grounding = grounding
+    if grounding.get("ungrounded"):
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "knowledge",
+                "payload": f"Warning: {len(grounding['ungrounded'])} citation(s) could not be grounded to provided sources.",
+            },
+        )
     # stream the dossier word by word — the text already exists in full,
     # this just replays it as a typing effect for the frontend
     for tok in dossier.split(" "):
@@ -98,17 +106,33 @@ async def cheminformatics(run):
     system_prompt = (
         "You are the Cheminformatics agent in a drug-discovery triage pipeline. "
         "You have RDKit-backed tools to filter and inspect a candidate molecule "
-        "library against known active binders for a target. Decide which filters "
-        "to apply and at what thresholds yourself — there is no fixed recipe or "
-        "required order. Justify every choice you make. Aim to end with roughly "
-        "20-200 survivors: far fewer means you over-filtered and should loosen "
-        "thresholds and re-screen; far more means you under-filtered and should "
-        "tighten. "
+        "library against known active binders for a target. Your tools handle "
+        "Lipinski Ro5 (allowing up to 1 violation by default, as per the real "
+        "rule — many marketed drugs have one violation), PAINS substructure "
+        "alerts (with specific alert names for interpretability), QED, and "
+        "Tanimoto similarity via Morgan fingerprints (radius 2, 2048-bit, "
+        "chirality-aware).\n\n"
+        "Decide which filters to apply and at what thresholds yourself — there "
+        "is no fixed recipe or required order. Justify every choice you make "
+        "with reference to the target class and candidate library properties. "
+        "For example, if the target is a kinase, you might note that kinase "
+        "inhibitors sometimes exceed MW 500 and relax that threshold; if the "
+        "library is fragment-like, default Lipinski may be too permissive.\n\n"
+        "Aim to end with roughly 20-200 survivors: far fewer means you likely "
+        "over-filtered (loosen and re-screen); far more means under-filtered "
+        "(tighten). However, if the data genuinely calls for a count outside "
+        "that range, report and justify it rather than gaming thresholds to hit "
+        "a headcount.\n\n"
+        "After screening, spot-check a few survivors with compute_descriptors "
+        "and similarity_to_actives to sanity-check the results before "
+        "finalizing. Review the funnel stats to confirm drop reasons are "
+        "reasonable.\n\n"
         "Act through your tools — do not describe a plan in prose before doing "
-        "anything. Your very first reply must be a tool call, not text. Only once "
-        "you have actually screened the library and are satisfied with the "
+        "anything. Your very first reply must be a tool call, not text. Only "
+        "once you have actually screened the library and are satisfied with the "
         "survivor set should you stop calling tools and reply with a short "
-        "plain-text summary of your final filtering strategy and why you chose it."
+        "plain-text summary of your final filtering strategy, the rationale "
+        "for each threshold choice, and any concerns about the survivor set."
     )
     user_msg = (
         f"Triage {len(run.candidates)} candidate molecules for target "
@@ -144,27 +168,6 @@ async def cheminformatics(run):
 
 
 # ---------------- Critic / Ranking (real tool-calling agent) ----------------
-def _parse_critic_json(text: str):
-    if not text:
-        return None
-    t = text.strip()
-    if t.startswith("```"):
-        t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
-        t = re.sub(r"```\s*$", "", t)
-        t = t.strip()
-    try:
-        return json.loads(t)
-    except Exception:
-        pass
-    m = re.search(r"\{.*\}", t, re.S)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            return None
-    return None
-
-
 async def critic(run):
     emit(run, {"type": "agent_start", "agent": "critic"})
     emit(
@@ -180,18 +183,20 @@ async def critic(run):
         "You are the Critic/Ranking agent in a drug-discovery triage pipeline. "
         "Survivors from the Cheminformatics agent's filtering are ready to be "
         "scored and ranked. You MUST fetch evidence with your tools before "
-        "scoring — never score blind. Check the filtering results, choose score "
-        "weights (similarity / QED / PAINS-clean) you can justify, then call "
-        "rank_survivors to produce the final ranking; the numeric scores are "
-        "computed by RDKit underneath, not by you — you choose weights and write "
-        "the explanation, the science is never hallucinated. "
-        "When done, reply with ONLY a JSON object, no markdown fences, no prose, "
-        "matching exactly this shape: "
-        '{"ranked":[{"smiles":str,"score":float,"confidence":str,"reason":str,'
-        '"evidence_used":[str]}],"yield_ok":bool,"replan_reason":str_or_null}. '
-        '"evidence_used" names which tool results backed your judgment for that '
-        'row. "yield_ok" is false only if the ranked set is clearly too small or '
-        'too large to be useful — explain why in "replan_reason", else null.'
+        "scoring — never score blind.\n\n"
+        "Workflow:\n"
+        "1. Call get_funnel_stats to understand what the cheminformatics agent did.\n"
+        "2. Spot-check a few survivors with compute_descriptors to verify quality.\n"
+        "3. Choose score weights (similarity / QED / PAINS-clean) you can "
+        "justify for this target class, then call rank_survivors to produce "
+        "the final ranking. The numeric scores are computed by RDKit — you "
+        "choose weights and write the explanation.\n"
+        "4. Call submit_ranking with per-compound evidence notes listing which "
+        "tool results backed your judgment. Use canonical SMILES exactly as "
+        "they appear in the rank_survivors output. Set yield_ok=false only if "
+        "the ranked set is clearly too small or too large to be useful.\n\n"
+        "Your very first reply must be a tool call, not text. Stop calling "
+        "tools after submit_ranking and reply with a one-sentence summary."
     )
     user_msg = (
         f"{len(run.survivors)} survivors are ready to rank for target "
@@ -206,51 +211,30 @@ async def critic(run):
     raw = await loop.run_tool_loop(
         run, "critic", system_prompt, user_msg, tools.CRITIC_TOOLS, executor, cfg=cfg
     )
-    parsed = _parse_critic_json(raw)
 
-    if parsed is None:
-        emit(
-            run,
-            {
-                "type": "log",
-                "agent": "critic",
-                "payload": "Output wasn't valid JSON — retrying with a stricter instruction…",
-            },
-        )
-        raw2 = await loop.run_tool_loop(
-            run,
-            "critic",
-            system_prompt
-            + "\n\nReturn ONLY valid JSON. No markdown fences. No commentary before or after.",
-            "Your previous reply was not valid JSON. Return ONLY the JSON object now.",
-            tools.CRITIC_TOOLS,
-            executor,
-            cfg=cfg,
-            max_iters=2,
-        )
-        parsed = _parse_critic_json(raw2)
-
-    # run.ranked (from the rank_survivors tool call) is the real, RDKit-scored
-    # list — the model's JSON only adds evidence notes to it, never its own numbers.
+    # The submit_ranking tool (called within the loop) attaches evidence_used
+    # to run.ranked using canonical SMILES matching, so we don't need to parse
+    # the model's free-text output. If the model never called submit_ranking
+    # (e.g. it ran out of iterations), we still have run.ranked from
+    # rank_survivors and just log the gap.
     if run.ranked:
         ranked = run.ranked
-        if parsed and isinstance(parsed.get("ranked"), list):
-            evidence_by_smiles = {
-                r.get("smiles"): r.get("evidence_used")
-                for r in parsed["ranked"]
-                if isinstance(r, dict) and r.get("smiles")
-            }
-            for r in ranked:
-                ev = evidence_by_smiles.get(r["smiles"])
-                if ev:
-                    r["evidence_used"] = ev
-        if parsed and parsed.get("replan_reason"):
+        if not any(r.get("evidence_used") for r in ranked):
             emit(
                 run,
                 {
                     "type": "log",
                     "agent": "critic",
-                    "payload": f"Model flagged yield concern: {parsed['replan_reason']}",
+                    "payload": "Model did not call submit_ranking — evidence notes not attached.",
+                },
+            )
+        if getattr(run, "critic_replan_reason", None):
+            emit(
+                run,
+                {
+                    "type": "log",
+                    "agent": "critic",
+                    "payload": f"Model flagged yield concern: {run.critic_replan_reason}",
                 },
             )
     else:

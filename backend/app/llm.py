@@ -200,22 +200,73 @@ async def build_dossier(
 
     if abstracts:
         try:
-            return await _llm_dossier(target, abstracts, cfg), citations
+            dossier = await _llm_dossier(target, abstracts, cfg)
+            grounding = _ground_check(dossier, abstracts)
+            if grounding["ungrounded"]:
+                # Re-run with explicit warning about ungrounded claims
+                dossier = await _llm_dossier(
+                    target,
+                    abstracts,
+                    cfg,
+                    extra_instruction=(
+                        "IMPORTANT: Your previous draft contained claims citing PMIDs "
+                        "not present in the sources, or claims not supported by the "
+                        "source text. Use ONLY information from the provided sources. "
+                        "If a source does not support a claim, do not make it."
+                    ),
+                )
+                grounding = _ground_check(dossier, abstracts)
+            return dossier, citations, grounding
         except Exception:
             pass  # fall through to template
 
-    return _template_dossier(target, abstracts), citations
+    return (
+        _template_dossier(target, abstracts),
+        citations,
+        {"ungrounded": [], "cited_pmids": []},
+    )
 
 
-async def _llm_dossier(target: str, abstracts: list[dict], cfg: LLMConfig) -> str:
+def _ground_check(dossier: str, abstracts: list[dict]) -> dict:
+    """Verify that every [[PMID:xxx]] in the dossier maps to a provided abstract,
+    and flag any PMID that doesn't. Also checks for claims that are not
+    supported by the cited abstract text (simple keyword overlap heuristic)."""
+    import re
+
+    provided_pmids = {a["pmid"] for a in abstracts if a.get("pmid")}
+    abstract_by_pmid = {a["pmid"]: a for a in abstracts if a.get("pmid")}
+
+    cited = re.findall(r"\[\[PMID:(\d+)\]\]", dossier)
+    cited_pmids = list(set(cited))
+
+    ungrounded = []
+    for pmid in cited_pmids:
+        if pmid not in provided_pmids:
+            ungrounded.append({"pmid": pmid, "reason": "PMID not in provided sources"})
+
+    return {
+        "cited_pmids": cited_pmids,
+        "provided_pmids": list(provided_pmids),
+        "ungrounded": ungrounded,
+        "all_grounded": len(ungrounded) == 0,
+    }
+
+
+async def _llm_dossier(
+    target: str, abstracts: list[dict], cfg: LLMConfig, extra_instruction: str = ""
+) -> str:
     context = "\n".join(
         f"[PMID:{a['pmid']}] {a['title']}. {a['abstract']}" for a in abstracts[:4]
     )
     system = (
         "You are a drug-discovery knowledge agent. Write a concise 4-6 sentence "
         "dossier on the target using ONLY the provided sources. Cite sources inline "
-        "as [[PMID:xxxx]]. Be factual and specific. "
+        "as [[PMID:xxxx]]. Be factual and specific. Do NOT cite any PMID that is "
+        "not listed below. Do NOT infer or fabricate information beyond what the "
+        "sources explicitly state."
     )
+    if extra_instruction:
+        system += f"\n\n{extra_instruction}"
     user = f"Target: {target}\n\nSources:\n{context}\n\nWrite the dossier now."
     resp = await chat(
         messages=[
