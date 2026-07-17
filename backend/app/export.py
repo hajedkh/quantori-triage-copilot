@@ -18,9 +18,13 @@ def write_csv(path: Path, ranked: list[dict]) -> None:
                 "nearest_active",
                 "max_similarity",
                 "reason",
+                "evidence_used",
             ]
         )
         for r in ranked:
+            evidence = (
+                "; ".join(r.get("evidence_used", [])) if r.get("evidence_used") else ""
+            )
             w.writerow(
                 [
                     r["rank"],
@@ -30,6 +34,7 @@ def write_csv(path: Path, ranked: list[dict]) -> None:
                     r["nearest_active"],
                     r["max_similarity"],
                     r["reason"],
+                    evidence,
                 ]
             )
 
@@ -55,12 +60,36 @@ def write_report(
     citations: list[dict],
     ranked: list[dict],
     metric: dict | None,
+    screen_stats: dict | None = None,
+    grounding: dict | None = None,
+    provenance: dict | None = None,
 ) -> None:
     lines = [f"# Target Triage Report — {target}", ""]
+    if provenance:
+        lines += [
+            "## Run provenance",
+            "",
+            f"- **Timestamp:** {provenance.get('timestamp', 'N/A')}",
+            f"- **Model:** {provenance.get('model', 'N/A')}",
+            f"- **Provider:** {provenance.get('provider', 'N/A')}",
+            "",
+        ]
     if metric:
         lines += [
             f"**Validation:** recovered {metric['recovered']} / {metric['total_actives']} "
             f"known actives in the top {metric['top_n']} (from {metric['screened']} screened).",
+            "",
+        ]
+    if screen_stats:
+        lines += [
+            "## Screening funnel",
+            "",
+            f"- **Input:** {screen_stats.get('input', '?')} candidates",
+            f"- **Invalid SMILES:** {screen_stats.get('invalid', 0)} dropped",
+            f"- **Lipinski failures:** {screen_stats.get('lipinski_dropped', 0)} dropped",
+            f"- **PAINS flagged:** {screen_stats.get('pains_dropped', 0)} dropped",
+            f"- **QED errors:** {screen_stats.get('qed_errors', 0)}",
+            f"- **Survivors:** {screen_stats.get('survivors', '?')}",
             "",
         ]
     lines += [
@@ -69,6 +98,14 @@ def write_report(
         dossier.replace("[[PMID:", "[PMID:").replace("]]", "]"),
         "",
     ]
+    if grounding and grounding.get("ungrounded"):
+        lines += [
+            "**Grounding warning:** The following cited PMIDs were not in the "
+            "provided source abstracts and may be hallucinated: "
+            + ", ".join(u["pmid"] for u in grounding["ungrounded"])
+            + ".",
+            "",
+        ]
     if citations:
         lines += ["### Citations", ""]
         for c in citations:
@@ -101,8 +138,21 @@ def export_all(
     citations: list[dict],
     ranked: list[dict],
     metric: dict | None,
+    screen_stats: dict | None = None,
+    grounding: dict | None = None,
+    provenance: dict | None = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     write_csv(run_dir / "shortlist.csv", ranked)
     write_sdf(run_dir / "shortlist.sdf", ranked)
-    write_report(run_dir / "report.md", target, dossier, citations, ranked, metric)
+    write_report(
+        run_dir / "report.md",
+        target,
+        dossier,
+        citations,
+        ranked,
+        metric,
+        screen_stats=screen_stats,
+        grounding=grounding,
+        provenance=provenance,
+    )

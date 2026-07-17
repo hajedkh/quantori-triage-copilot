@@ -38,27 +38,51 @@ def descriptors(mol) -> dict:
     }
 
 
+def lipinski_violations(
+    d: dict,
+    mw_max: float = 500,
+    logp_max: float = 5,
+    hbd_max: int = 5,
+    hba_max: int = 10,
+) -> list[str]:
+    """Return list of violated Ro5 criteria (empty = fully compliant)."""
+    violations = []
+    if d["mw"] > mw_max:
+        violations.append(f"MW {d['mw']} > {mw_max}")
+    if d["logp"] > logp_max:
+        violations.append(f"LogP {d['logp']} > {logp_max}")
+    if d["hbd"] > hbd_max:
+        violations.append(f"HBD {d['hbd']} > {hbd_max}")
+    if d["hba"] > hba_max:
+        violations.append(f"HBA {d['hba']} > {hba_max}")
+    return violations
+
+
 def lipinski_pass(
     d: dict,
     mw_max: float = 500,
     logp_max: float = 5,
     hbd_max: int = 5,
     hba_max: int = 10,
+    max_violations: int = 1,
 ) -> bool:
+    """True Ro5: pass if at most `max_violations` criteria are violated."""
     return (
-        d["mw"] <= mw_max
-        and d["logp"] <= logp_max
-        and d["hbd"] <= hbd_max
-        and d["hba"] <= hba_max
+        len(lipinski_violations(d, mw_max, logp_max, hbd_max, hba_max))
+        <= max_violations
     )
 
 
-def pains_flag(mol) -> bool:
-    return _PAINS.HasMatch(mol)
+def pains_flag(mol) -> list[str]:
+    """Return list of PAINS alert names that matched (empty = clean)."""
+    matches = _PAINS.GetMatches(mol)
+    return [entry.GetDescription() for entry in matches]
 
 
-def fingerprint(mol):
-    return AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+def fingerprint(mol, use_chirality: bool = True):
+    return AllChem.GetMorganFingerprintAsBitVect(
+        mol, radius=2, nBits=2048, useChirality=use_chirality
+    )
 
 
 def max_tanimoto(fp, active_fps: list) -> tuple[float, int]:
@@ -80,16 +104,19 @@ def build_active_fps(active_smiles: list[str]):
     return fps, ids
 
 
-def screen(candidates: list[dict], active_smiles: list[str]) -> tuple[list[dict], dict]:
+def screen(
+    candidates: list[dict], active_smiles: list[str], max_violations: int = 1
+) -> tuple[list[dict], dict]:
     """Run the RDKit funnel over candidates.
 
     candidates: [{"smiles": str, "label": bool|None}, ...]
-    Returns (survivors, stats). Survivors pass Lipinski and are PAINS-clean.
+    Returns (survivors, stats). Survivors pass Lipinski (≤max_violations)
+    and are PAINS-clean.
     """
     active_fps, _ = build_active_fps(active_smiles)
 
     n_input = len(candidates)
-    n_invalid = n_lipinski = n_pains = 0
+    n_invalid = n_lipinski = n_pains = n_qed_err = 0
     survivors: list[dict] = []
 
     for c in candidates:
@@ -98,26 +125,33 @@ def screen(candidates: list[dict], active_smiles: list[str]) -> tuple[list[dict]
             n_invalid += 1
             continue
         d = descriptors(mol)
-        lip = lipinski_pass(d)
-        if not lip:
+        violations = lipinski_violations(d)
+        if len(violations) > max_violations:
             n_lipinski += 1
             continue
-        if pains_flag(mol):
+        alerts = pains_flag(mol)
+        if alerts:
             n_pains += 1
             continue
         sim, idx = max_tanimoto(fingerprint(mol), active_fps)
+        qed_error = False
         try:
             qed = round(QED.qed(mol), 3)
         except Exception:
-            qed = 0.5
+            qed = None
+            qed_error = True
+            n_qed_err += 1
         survivors.append(
             {
                 "smiles": Chem.MolToSmiles(mol),
                 "label": c.get("label"),
                 **d,
                 "qed": qed,
-                "lipinski_pass": lip,
+                "qed_error": qed_error,
+                "lipinski_pass": True,
+                "lipinski_violations": violations,
                 "pains_flag": False,
+                "pains_alerts": [],
                 "max_similarity": sim,
                 "nearest_active": f"active#{idx}" if idx >= 0 else "-",
             }
@@ -128,6 +162,7 @@ def screen(candidates: list[dict], active_smiles: list[str]) -> tuple[list[dict]
         "invalid": n_invalid,
         "lipinski_dropped": n_lipinski,
         "pains_dropped": n_pains,
+        "qed_errors": n_qed_err,
         "after_lipinski": n_input - n_invalid - n_lipinski,
         "survivors": len(survivors),
     }
@@ -142,14 +177,28 @@ def _confidence(sim: float, lip: bool) -> str:
     return "Low"
 
 
+def canonical(smiles: str) -> str | None:
+    """Canonicalize a SMILES string. Returns None if unparseable."""
+    mol = parse(smiles)
+    if mol is None:
+        return None
+    return Chem.MolToSmiles(mol)
+
+
 def rank(
-    survivors: list[dict], active_chembl_ids: list[str], top_n: int = 600
+    survivors: list[dict],
+    active_chembl_ids: list[str],
+    top_n: int = 600,
+    w_sim: float = 0.6,
+    w_qed: float = 0.3,
+    w_pains: float = 0.1,
 ) -> list[dict]:
     """Score, bucket confidence, drop Low, sort, take top_n, assign ranks."""
     scored = []
     for s in survivors:
         sim = s["max_similarity"]
-        score = 0.6 * sim + 0.3 * s["qed"] + 0.1 * (0.0 if s["pains_flag"] else 1.0)
+        qed = s["qed"] if s.get("qed") is not None else 0.0
+        score = w_sim * sim + w_qed * qed + w_pains * (0.0 if s["pains_flag"] else 1.0)
         conf = _confidence(sim, s["lipinski_pass"])
         if conf == "Low":
             continue
@@ -164,10 +213,15 @@ def rank(
             if 0 <= idx < len(active_chembl_ids)
             else s["nearest_active"]
         )
+        qed_note = " (QED unavailable)" if s.get("qed_error") else ""
         reason = (
             f"{sim:.2f} Tanimoto to {nearest} (known active); "
-            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski; "
-            f"{'no PAINS' if not s['pains_flag'] else 'PAINS flagged'}."
+            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski"
+        )
+        if s.get("lipinski_violations"):
+            reason += f" ({len(s['lipinski_violations'])} violation(s))"
+        reason += (
+            f"; {'no PAINS' if not s['pains_flag'] else 'PAINS flagged'}{qed_note}."
         )
         scored.append(
             {

@@ -57,6 +57,10 @@ def screen_candidates_schema() -> dict:
                         "type": "boolean",
                         "description": "Drop PAINS-flagged structures. Default true.",
                     },
+                    "max_violations": {
+                        "type": "integer",
+                        "description": "Max Lipinski violations tolerated. Default 1 (true Ro5).",
+                    },
                 },
                 "required": [],
             },
@@ -146,6 +150,49 @@ def get_funnel_stats_schema() -> dict:
     }
 
 
+def submit_ranking_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "submit_ranking",
+            "description": "Submit the final ranked shortlist with per-compound evidence notes. Call AFTER rank_survivors.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "evidence_notes": {
+                        "type": "array",
+                        "description": "Per-compound evidence for top hits.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "smiles": {
+                                    "type": "string",
+                                    "description": "Canonical SMILES of the compound.",
+                                },
+                                "evidence_used": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Which tool results backed your judgment.",
+                                },
+                            },
+                            "required": ["smiles", "evidence_used"],
+                        },
+                    },
+                    "yield_ok": {
+                        "type": "boolean",
+                        "description": "True if ranked set size is reasonable.",
+                    },
+                    "replan_reason": {
+                        "type": ["string", "null"],
+                        "description": "Why yield is problematic, if yield_ok is false.",
+                    },
+                },
+                "required": ["evidence_notes", "yield_ok"],
+            },
+        },
+    }
+
+
 CHEM_TOOLS = [
     screen_candidates_schema(),
     compute_descriptors_schema(),
@@ -157,6 +204,7 @@ CRITIC_TOOLS = [
     compute_descriptors_schema(),
     get_funnel_stats_schema(),
     rank_survivors_schema(),
+    submit_ranking_schema(),
 ]
 
 
@@ -170,11 +218,12 @@ def _screen_candidates(
     hbd_max: int = 5,
     hba_max: int = 10,
     apply_pains: bool = True,
+    max_violations: int = 1,
 ) -> dict:
     active_fps, _ = chem.build_active_fps(run.known_actives)
 
     n_input = len(run.candidates)
-    n_invalid = n_lipinski = n_pains = 0
+    n_invalid = n_lipinski = n_pains = n_qed_err = 0
     survivors: list[dict] = []
     invalid_examples: list[str] = []
 
@@ -186,29 +235,36 @@ def _screen_candidates(
                 invalid_examples.append(c["smiles"])
             continue
         d = chem.descriptors(mol)
-        lip = chem.lipinski_pass(
+        violations = chem.lipinski_violations(
             d, mw_max=mw_max, logp_max=logp_max, hbd_max=hbd_max, hba_max=hba_max
         )
-        if not lip:
+        if len(violations) > max_violations:
             n_lipinski += 1
             continue
-        flagged = chem.pains_flag(mol)
-        if apply_pains and flagged:
+        alerts = chem.pains_flag(mol)
+        if apply_pains and alerts:
             n_pains += 1
             continue
         sim, idx = chem.max_tanimoto(chem.fingerprint(mol), active_fps)
+        qed_error = False
         try:
             qed = round(chem.QED.qed(mol), 3)
         except Exception:
-            qed = 0.5
+            qed = None
+            qed_error = True
+            n_qed_err += 1
+        canonical_smi = chem.Chem.MolToSmiles(mol)
         survivors.append(
             {
-                "smiles": chem.Chem.MolToSmiles(mol),
+                "smiles": canonical_smi,
                 "label": c.get("label"),
                 **d,
                 "qed": qed,
-                "lipinski_pass": lip,
-                "pains_flag": flagged,
+                "qed_error": qed_error,
+                "lipinski_pass": True,
+                "lipinski_violations": violations,
+                "pains_flag": bool(alerts),
+                "pains_alerts": alerts,
                 "max_similarity": sim,
                 "nearest_active": f"active#{idx}" if idx >= 0 else "-",
             }
@@ -219,6 +275,7 @@ def _screen_candidates(
         "invalid": n_invalid,
         "lipinski_dropped": n_lipinski,
         "pains_dropped": n_pains,
+        "qed_errors": n_qed_err,
         "after_lipinski": n_input - n_invalid - n_lipinski,
         "survivors": len(survivors),
     }
@@ -240,6 +297,7 @@ def _screen_candidates(
             "hbd_max": hbd_max,
             "hba_max": hba_max,
             "apply_pains": apply_pains,
+            "max_lipinski_violations": max_violations,
         },
         "stats": stats,
         "survivor_examples": [
@@ -247,6 +305,7 @@ def _screen_candidates(
                 "smiles": s["smiles"],
                 "max_similarity": s["max_similarity"],
                 "qed": s["qed"],
+                "lipinski_violations": s["lipinski_violations"],
             }
             for s in survivors[:_MAX_EXAMPLES]
         ],
@@ -313,8 +372,9 @@ def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
     scored = []
     for s in survivors:
         sim = s["max_similarity"]
+        qed = s["qed"] if s.get("qed") is not None else 0.0
         score = (
-            w_sim * sim + w_qed * s["qed"] + w_pains * (0.0 if s["pains_flag"] else 1.0)
+            w_sim * sim + w_qed * qed + w_pains * (0.0 if s.get("pains_flag") else 1.0)
         )
         conf = chem._confidence(sim, s["lipinski_pass"])
         if conf == "Low":
@@ -325,14 +385,21 @@ def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
             else -1
         )
         nearest = active_ids[idx] if 0 <= idx < len(active_ids) else s["nearest_active"]
+        qed_note = " (QED unavailable)" if s.get("qed_error") else ""
         reason = (
             f"{sim:.2f} Tanimoto to {nearest} (known active); "
-            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski; "
-            f"{'no PAINS' if not s['pains_flag'] else 'PAINS flagged'}."
+            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski"
         )
+        if s.get("lipinski_violations"):
+            reason += f" ({len(s['lipinski_violations'])} violation(s))"
+        reason += (
+            f"; {'no PAINS' if not s.get('pains_flag') else 'PAINS flagged'}{qed_note}."
+        )
+        # Always store canonical SMILES for reliable matching
+        canonical_smi = chem.canonical(s["smiles"]) or s["smiles"]
         scored.append(
             {
-                "smiles": s["smiles"],
+                "smiles": canonical_smi,
                 "score": round(min(score, 0.99), 3),
                 "confidence": conf,
                 "reason": reason,
@@ -375,6 +442,49 @@ def _get_funnel_stats(run) -> dict:
     return dict(run.screen_stats)
 
 
+def _submit_ranking(
+    run, evidence_notes: list = None, yield_ok: bool = True, replan_reason: str = None
+) -> dict:
+    """Accept the critic's structured evidence and attach it to run.ranked
+    using canonical SMILES matching. Returns match stats so the model can
+    see if any notes failed to attach."""
+    if not run.ranked:
+        raise ValueError("no ranking exists yet — call rank_survivors first")
+
+    matched = 0
+    unmatched_smiles: list[str] = []
+
+    if evidence_notes:
+        # Build lookup by canonical SMILES for robust matching
+        ranked_by_smi = {}
+        for r in run.ranked:
+            canonical_smi = chem.canonical(r["smiles"]) or r["smiles"]
+            ranked_by_smi[canonical_smi] = r
+
+        for note in evidence_notes:
+            raw_smi = note.get("smiles", "")
+            canonical_smi = chem.canonical(raw_smi) or raw_smi
+            target_row = ranked_by_smi.get(canonical_smi)
+            if target_row:
+                target_row["evidence_used"] = note.get("evidence_used", [])
+                matched += 1
+            else:
+                unmatched_smiles.append(raw_smi)
+
+    run.critic_yield_ok = yield_ok
+    run.critic_replan_reason = replan_reason
+
+    return {
+        "accepted": True,
+        "evidence_matched": matched,
+        "evidence_unmatched": len(unmatched_smiles),
+        "unmatched_examples": unmatched_smiles[:_MAX_EXAMPLES],
+        "yield_ok": yield_ok,
+        "replan_reason": replan_reason,
+        "ranked_count": len(run.ranked),
+    }
+
+
 async def execute_tool(run, name: str, args: dict) -> dict:
     """Dispatch a model-requested tool call by name. Sync chem work under an
     async signature so loop.py can `await` every tool uniformly."""
@@ -389,4 +499,6 @@ async def execute_tool(run, name: str, args: dict) -> dict:
         return _rank_survivors(run, **args)
     if name == "get_funnel_stats":
         return _get_funnel_stats(run)
+    if name == "submit_ranking":
+        return _submit_ranking(run, **args)
     raise ValueError(f"unknown tool: {name!r}")
