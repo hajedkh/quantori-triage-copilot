@@ -150,7 +150,8 @@ async def post_llm_config(body: LLMConfigIn):
     valid_models = options[provider]
     if body.model not in valid_models:
         raise HTTPException(
-            400, f"unknown model {body.model!r} for provider {provider!r} — valid: {valid_models}"
+            400,
+            f"unknown model {body.model!r} for provider {provider!r} — valid: {valid_models}",
         )
     cfg = llm.set_active_config(provider, body.model)
     return {"provider": cfg.provider, "model": cfg.model, "options": options}

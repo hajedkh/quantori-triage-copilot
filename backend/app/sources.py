@@ -71,7 +71,12 @@ def pubmed_abstracts(term: str, retmax: int = 6) -> list[dict]:
     try:
         s = requests.get(
             f"{EUTILS}/esearch.fcgi",
-            params={"db": "pubmed", "term": f"{term} inhibitor", "retmax": retmax, "retmode": "json"},
+            params={
+                "db": "pubmed",
+                "term": f"{term} inhibitor",
+                "retmax": retmax,
+                "retmode": "json",
+            },
             timeout=TIMEOUT,
         )
         s.raise_for_status()
@@ -80,7 +85,12 @@ def pubmed_abstracts(term: str, retmax: int = 6) -> list[dict]:
             return _fallback_abstracts(term)
         f = requests.get(
             f"{EUTILS}/efetch.fcgi",
-            params={"db": "pubmed", "id": ",".join(ids), "rettype": "abstract", "retmode": "xml"},
+            params={
+                "db": "pubmed",
+                "id": ",".join(ids),
+                "rettype": "abstract",
+                "retmode": "xml",
+            },
             timeout=TIMEOUT,
         )
         f.raise_for_status()
@@ -98,7 +108,9 @@ def _parse_pubmed_xml(xml: str) -> list[dict]:
             title = art.findtext(".//ArticleTitle") or ""
             abst = " ".join(t.text or "" for t in art.findall(".//AbstractText"))
             if title:
-                out.append({"pmid": pmid, "title": title.strip(), "abstract": abst.strip()})
+                out.append(
+                    {"pmid": pmid, "title": title.strip(), "abstract": abst.strip()}
+                )
     except Exception:
         return []
     return out[:6]
@@ -109,11 +121,13 @@ def _fallback_abstracts(term: str) -> list[dict]:
         {
             "pmid": "15737014",
             "title": f"Acquired resistance mechanisms in {term}-driven cancers",
-            "abstract": f"A secondary {term} mutation was identified in tumors that became resistant to targeted therapy after initial response.",
+            "abstract": f"A secondary {term} mutation was identified in tumors that became resistant to "
+            + "targeted therapy after initial response.",
         },
         {
             "pmid": "16729045",
             "title": f"Structure-activity relationships of {term} inhibitors",
-            "abstract": f"Potent {term} inhibitors share a common heteroaromatic hinge-binding scaffold used here as the similarity anchor.",
+            "abstract": f"Potent {term} inhibitors share a common heteroaromatic hinge-binding scaffold used "
+            + "here as the similarity anchor.",
         },
     ]

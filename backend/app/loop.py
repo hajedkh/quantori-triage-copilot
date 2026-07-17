@@ -13,7 +13,7 @@ tool_call event's "error"/"retry" status is what makes that visible on the wire.
 from __future__ import annotations
 
 import json
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from . import llm as llm_module
 from .store import emit
@@ -46,7 +46,9 @@ async def run_tool_loop(
         # after that, let the model decide when it's actually done.
         tool_choice = "required" if iteration == 1 else "auto"
         try:
-            resp = await llm_module.chat(messages=messages, tools=tools, cfg=cfg, tool_choice=tool_choice)
+            resp = await llm_module.chat(
+                messages=messages, tools=tools, cfg=cfg, tool_choice=tool_choice
+            )
         except Exception as e:
             emit(
                 run,
@@ -86,7 +88,10 @@ async def run_tool_loop(
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
                     }
                     for tc in tool_calls
                 ],
@@ -129,7 +134,9 @@ async def run_tool_loop(
                 },
             )
 
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
+            messages.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": result_str}
+            )
 
         if iteration == max_iters:
             final_text = thought  # hard stop — best-effort, never raise
