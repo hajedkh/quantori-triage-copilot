@@ -194,6 +194,11 @@ def rerank_schema() -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "profile": {
+                        "type": "string",
+                        "enum": ["balanced", "quality", "explore", "strict"],
+                        "description": "Ranking profile preset to use.",
+                    },
                     "weights": {
                         "type": "object",
                         "description": "Score weights. Defaults: similarity 0.40, breadth 0.15, qed 0.20, sa 0.15, penalty_lipinski 0.05, penalty_pains 0.03.",
@@ -279,6 +284,17 @@ def get_metric_schema() -> dict:
     }
 
 
+def get_ranking_options_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_ranking_options",
+            "description": "Get available ranking profiles and what each optimizes for.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
 def focus_scaffold_schema() -> dict:
     return {
         "type": "function",
@@ -317,6 +333,7 @@ READ_TOOLS = [
     get_funnel_breakdown_schema(),
     get_scaffold_summary_schema(),
     get_metric_schema(),
+    get_ranking_options_schema(),
 ]
 
 MUTATE_TOOLS = [
@@ -345,6 +362,7 @@ def _get_run_status(run) -> dict:
     return {
         "status": run.status,
         "target": run.target_name,
+        "ranking_profile": getattr(run, "ranking_profile", "balanced"),
         "funnel": {
             "input": st.get("input", len(run.candidates)),
             "survivors": len(run.survivors),
@@ -451,6 +469,30 @@ def _get_metric(run) -> dict:
     return dict(run.metric)
 
 
+def _get_ranking_options(run) -> dict:
+    return {
+        "selected_profile": getattr(run, "ranking_profile", "balanced"),
+        "profiles": {
+            "balanced": {
+                "summary": "Balanced quality and developability.",
+                "best_for": "default triage and general-purpose runs",
+            },
+            "quality": {
+                "summary": "Heavier emphasis on similarity and multi-active coverage.",
+                "best_for": "lead-followup around known active chemotypes",
+            },
+            "explore": {
+                "summary": "More novelty-friendly with softer penalties.",
+                "best_for": "scaffold hopping and broader exploration",
+            },
+            "strict": {
+                "summary": "Stronger penalties for liabilities and stricter confidence gates.",
+                "best_for": "conservative shortlists for downstream synthesis",
+            },
+        },
+    }
+
+
 def _explain(run, rank: int) -> dict:
     if rank < 1 or rank > len(run.ranked):
         raise ValueError(
@@ -551,17 +593,27 @@ def _similar_to(run, rank: int, k: int = 5) -> dict:
 
 
 def _score_survivors(
-    run, weights: dict, scaffold_pattern=None, scaffold_bonus: float = 0.15
+    run,
+    weights: dict,
+    profile: str | None = None,
+    scaffold_pattern=None,
+    scaffold_bonus: float = 0.15,
 ):
     """Shared scoring pass for rerank/focus_scaffold. Uses chem.compute_score
     (the same six-component formula the Critic's rank_survivors uses) and the
     current three-arg chem._confidence(score, sim, lipinski_pass), so a chat
     re-rank produces scores directly comparable to the pipeline's. Side-effect
     free: builds and returns a candidate list without writing run.ranked."""
+    selected_profile = (profile or getattr(run, "ranking_profile", "balanced")).lower()
+    profile_cfg = chem.resolve_ranking_profile(selected_profile)
+    merged_weights = {**profile_cfg["weights"], **(weights or {})}
+    score_mode = profile_cfg["score_mode"]
+    confidence_policy = profile_cfg["confidence_policy"]
+
     scored = []
     matched_count = 0
     for s in run.survivors:
-        score = chem.compute_score(s, weights)  # handles qed=None internally
+        score = chem.compute_score(s, merged_weights, score_mode=score_mode)
         sim = s["max_similarity"]
         matched = False
         if scaffold_pattern is not None:
@@ -570,7 +622,7 @@ def _score_survivors(
             if matched:
                 matched_count += 1
                 score = round(min(1.0, score + scaffold_bonus), 3)
-        conf = chem._confidence(score, sim, s["lipinski_pass"])
+        conf = chem._confidence(score, sim, s["lipinski_pass"], confidence_policy)
         if conf == "Low":
             continue
         idx = (
@@ -609,7 +661,7 @@ def _score_survivors(
     top = scored[:top_n]
     for i, r in enumerate(top, 1):
         r["rank"] = i
-    return top, matched_count
+    return top, matched_count, selected_profile
 
 
 def _apply_ranked(run, new_ranked: list) -> None:
@@ -640,27 +692,38 @@ def _top20_diff(old_ranked: list, new_ranked: list) -> tuple:
     return entering, leaving
 
 
-def _rerank(run, weights: dict = None, confirmed: bool = False) -> dict:
+def _rerank(
+    run,
+    weights: dict = None,
+    profile: str | None = None,
+    confirmed: bool = False,
+) -> dict:
     if run.status != "awaiting_approval":
         raise ValueError(
             f"rerank is only available at the approval gate (status={run.status!r})"
         )
     weights = weights or {}
-    new_ranked, _ = _score_survivors(run, weights)
+    new_ranked, _, selected_profile = _score_survivors(run, weights, profile=profile)
     entering, leaving = _top20_diff(run.ranked, new_ranked)
 
     if not confirmed:
         return {
             "preview": True,
-            "weights": {**chem.DEFAULT_WEIGHTS, **(weights or {})},
+            "profile": selected_profile,
+            "weights": {
+                **chem.resolve_ranking_profile(selected_profile)["weights"],
+                **(weights or {}),
+            },
             "entering_top20": entering,
             "leaving_top20": leaving,
             "message": "Not applied. Call again with confirmed=true to commit.",
         }
 
+    run.ranking_profile = selected_profile
     _apply_ranked(run, new_ranked)
     return {
         "applied": True,
+        "profile": selected_profile,
         "ranked_count": len(new_ranked),
         "entering_top20": entering,
         "leaving_top20": leaving,
@@ -676,13 +739,19 @@ def _focus_scaffold(run, smarts: str, confirmed: bool = False) -> dict:
     if pattern is None:
         raise ValueError(f"invalid SMARTS pattern: {smarts!r}")
 
-    new_ranked, matched_count = _score_survivors(run, {}, scaffold_pattern=pattern)
+    new_ranked, matched_count, selected_profile = _score_survivors(
+        run,
+        {},
+        profile=getattr(run, "ranking_profile", "balanced"),
+        scaffold_pattern=pattern,
+    )
     entering, leaving = _top20_diff(run.ranked, new_ranked)
 
     if not confirmed:
         return {
             "preview": True,
             "smarts": smarts,
+            "profile": selected_profile,
             "matched_count": matched_count,
             "entering_top20": entering,
             "leaving_top20": leaving,
@@ -770,6 +839,8 @@ async def execute_chat_tool(run, name: str, args: dict) -> dict:
         return _get_scaffold_summary(run)
     if name == "get_metric":
         return _get_metric(run)
+    if name == "get_ranking_options":
+        return _get_ranking_options(run)
     if name == "explain":
         return _explain(run, **args)
     if name == "why_not":

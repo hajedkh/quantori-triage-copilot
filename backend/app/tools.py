@@ -127,6 +127,11 @@ def rank_survivors_schema() -> dict:
                         "type": "boolean",
                         "description": "Scaffold-aware diversity reranking. Default true.",
                     },
+                    "profile": {
+                        "type": "string",
+                        "enum": ["balanced", "quality", "explore", "strict"],
+                        "description": "Ranking profile preset. Default uses run-selected profile.",
+                    },
                     "weights": {
                         "type": "object",
                         "description": "Score component weights. Defaults: similarity 0.40, breadth 0.15, qed 0.20, sa 0.15, penalty_lipinski 0.05/violation, penalty_pains 0.03/alert.",
@@ -338,18 +343,27 @@ def _similarity_to_actives(run, smiles_list: list) -> dict:
 
 
 def _rank_survivors(
-    run, top_n: int = 600, weights: dict = None, diversity: bool = True
+    run,
+    top_n: int = 600,
+    weights: dict = None,
+    diversity: bool = True,
+    profile: str | None = None,
 ) -> dict:
-    w = {**chem.DEFAULT_WEIGHTS, **(weights or {})}
+    selected_profile = (profile or getattr(run, "ranking_profile", "balanced")).lower()
+    run.ranking_profile = selected_profile
+    profile_cfg = chem.resolve_ranking_profile(selected_profile)
+    w = {**profile_cfg["weights"], **(weights or {})}
+    score_mode = profile_cfg["score_mode"]
+    confidence_policy = profile_cfg["confidence_policy"]
 
     survivors = run.survivors
     active_ids = run.active_ids
 
     scored = []
     for s in survivors:
-        score = chem.compute_score(s, w)
+        score = chem.compute_score(s, w, score_mode=score_mode)
         sim = s["max_similarity"]
-        conf = chem._confidence(score, sim, s["lipinski_pass"])
+        conf = chem._confidence(score, sim, s["lipinski_pass"], confidence_policy)
         if conf == "Low":
             continue
         idx = (
@@ -408,6 +422,7 @@ def _rank_survivors(
     scores = [r["score"] for r in top]
     n_scaffolds = len({r.get("scaffold", "") for r in top})
     return {
+        "profile": selected_profile,
         "weights_used": w,
         "diversity_enabled": diversity,
         "ranked_count": len(top),

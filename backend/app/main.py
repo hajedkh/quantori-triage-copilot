@@ -83,6 +83,17 @@ class DiversifyIn(BaseModel):
     lam: float | None = None
     cutoff: float | None = None
     maxGenerated: int = 200
+    rankingProfile: str = "balanced"
+
+
+class ApproveIn(BaseModel):
+    rankingProfile: str = "balanced"
+
+
+class RerankOut(BaseModel):
+    ok: bool
+    rankingProfile: str
+    ranked: list[dict]
 
 
 @app.post("/run")
@@ -125,7 +136,7 @@ async def stream(run_id: str):
 
 
 @app.post("/approve/{run_id}")
-async def approve(run_id: str):
+async def approve(run_id: str, body: ApproveIn | None = None):
     run = RUNS.get(run_id)
     if not run:
         raise HTTPException(404, "run not found")
@@ -133,6 +144,14 @@ async def approve(run_id: str):
         raise HTTPException(
             400, f"can only approve at the human gate (status={run.status!r})"
         )
+
+    ranking_profile = (
+        ((body.rankingProfile if body else "balanced") or "balanced").strip().lower()
+    )
+    if ranking_profile not in ("balanced", "quality", "explore", "strict"):
+        raise HTTPException(400, f"unknown ranking profile: {ranking_profile!r}")
+
+    await graph.apply_gate_rerank(run_id, ranking_profile)
     await graph.resume(run_id)  # writes the export files
     return {"ok": True}
 
@@ -160,15 +179,42 @@ async def diversify(run_id: str, body: DiversifyIn):
     max_generated = int(body.maxGenerated or 200)
     max_generated = max(1, min(5000, max_generated))
 
+    ranking_profile = (body.rankingProfile or "balanced").strip().lower()
+    if ranking_profile not in ("balanced", "quality", "explore", "strict"):
+        raise HTTPException(400, f"unknown ranking profile: {body.rankingProfile!r}")
+
     opts = {
         "mode": mode,
         "lam": lam,
         "cutoff": cutoff,
         "max_generated": max_generated,
+        "ranking_profile": ranking_profile,
     }
 
     asyncio.create_task(graph.diversify_and_retriage(run_id, opts))
     return {"ok": True}
+
+
+@app.post("/rerank/{run_id}", response_model=RerankOut)
+async def rerank(run_id: str, body: ApproveIn):
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "run not found")
+    if run.status != "awaiting_approval":
+        raise HTTPException(
+            400, f"can only rerank at the human gate (status={run.status!r})"
+        )
+
+    ranking_profile = (body.rankingProfile or "balanced").strip().lower()
+    if ranking_profile not in ("balanced", "quality", "explore", "strict"):
+        raise HTTPException(400, f"unknown ranking profile: {ranking_profile!r}")
+
+    await graph.apply_gate_rerank(run_id, ranking_profile)
+    return {
+        "ok": True,
+        "rankingProfile": ranking_profile,
+        "ranked": run.ranked,
+    }
 
 
 @app.get("/download/{run_id}/{kind}")
@@ -199,7 +245,8 @@ CHAT_SYSTEM_PROMPT = (
     "For workflow/status questions use get_run_status and get_agent_trace; for "
     "the screening funnel use get_funnel_breakdown (invalid/Lipinski/PAINS/"
     "survivors); for chemotype coverage use get_scaffold_summary; for the "
-    "held-out validation use get_metric; for a single compound use "
+    "held-out validation use get_metric; to explain ranking profiles use "
+    "get_ranking_options; for a single compound use "
     "get_molecule/explain/why_not/similar_to. "
     "Before any change, preview it and ask. A mutate tool (rerank, "
     "focus_scaffold, diversify_shortlist) called without confirmed=true returns "

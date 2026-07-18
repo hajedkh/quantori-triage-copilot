@@ -24,7 +24,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
 from langgraph.checkpoint.memory import MemorySaver
 
-from . import agents, export
+from . import agents, export, chem
 from .store import RUNS, emit
 
 logger = logging.getLogger(__name__)
@@ -183,6 +183,42 @@ async def resume(run_id: str):
     run.status = "exported"
 
 
+async def apply_gate_rerank(run_id: str, ranking_profile: str | None = None):
+    """Apply a deterministic rerank from current survivors at the approval gate.
+
+    This avoids another full model tool loop while still honoring the operator's
+    selected ranking profile before export.
+    """
+    run = RUNS[run_id]
+    if ranking_profile:
+        run.ranking_profile = ranking_profile
+
+    top_n = len(run.ranked) or 600
+    run.ranked = chem.rank(
+        run.survivors,
+        run.active_ids,
+        top_n=top_n,
+        profile=run.ranking_profile,
+    )
+
+    n_in = (run.screen_stats or {}).get("input", len(run.candidates))
+    emit(
+        run,
+        {
+            "type": "funnel",
+            "payload": {
+                "input": n_in,
+                "filtered": len(run.survivors),
+                "ranked": len(run.ranked),
+                "diversified_added": (run.screen_stats or {}).get(
+                    "diversified_added", 0
+                ),
+            },
+        },
+    )
+    emit(run, {"type": "ranked", "payload": run.ranked})
+
+
 async def diversify_and_retriage(run_id: str, opts: dict | None = None):
     """Run one operator-requested iteration:
     diversifier -> cheminformatics -> critic -> human gate.
@@ -199,6 +235,7 @@ async def diversify_and_retriage(run_id: str, opts: dict | None = None):
         run.diversify_max_generated = opts.get(
             "max_generated", run.diversify_max_generated
         )
+        run.ranking_profile = opts.get("ranking_profile", run.ranking_profile)
     emit(
         run,
         {

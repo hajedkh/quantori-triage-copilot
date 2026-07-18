@@ -3,7 +3,13 @@
 // so App.tsx handles both modes with one reducer.
 
 import type { StreamEvent } from "./mock";
-import type { LLMOptions, LLMProvider, DiversifyRequest } from "./types";
+import type {
+  LLMOptions,
+  LLMProvider,
+  DiversifyRequest,
+  RankingProfile,
+  RankedMol,
+} from "./types";
 
 export interface StartResult {
   runId: string;
@@ -92,9 +98,34 @@ export function subscribe(
 }
 
 // POST /approve/{runId} -> resumes the interrupted graph, triggers export.
-export async function approveRun(runId: string): Promise<void> {
-  const res = await fetch(`/api/approve/${runId}`, { method: "POST" });
+export async function approveRun(
+  runId: string,
+  rankingProfile?: RankingProfile
+): Promise<void> {
+  const body = rankingProfile ? JSON.stringify({ rankingProfile }) : undefined;
+  const res = await fetch(`/api/approve/${runId}`, {
+    method: "POST",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body,
+  });
   if (!res.ok) throw new Error(`approve failed: ${res.status}`);
+}
+
+export async function rerankRun(
+  runId: string,
+  rankingProfile: RankingProfile
+): Promise<{ ranked: RankedMol[]; rankingProfile: RankingProfile }> {
+  const res = await fetch(`/api/rerank/${runId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rankingProfile }),
+  });
+  if (!res.ok) throw new Error(`rerank failed: ${res.status}`);
+  const data = await res.json();
+  return {
+    ranked: data.ranked,
+    rankingProfile: data.rankingProfile,
+  };
 }
 
 // POST /diversify/{runId} -> run one more loop:

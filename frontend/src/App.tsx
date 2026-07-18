@@ -6,8 +6,22 @@ import OutputTabs from "./components/OutputTabs";
 import ApproveBar from "./components/ApproveBar";
 import ChatPanel from "./components/ChatPanel";
 import { runMockStream, buildCsv, type StreamEvent } from "./mock";
-import { startRun, subscribe, approveRun, diversifyRun, downloadUrl, createSession } from "./api";
-import type { AgentId, RunState, LLMHealth, DiversifyRequest } from "./types";
+import {
+  startRun,
+  subscribe,
+  approveRun,
+  diversifyRun,
+  rerankRun,
+  downloadUrl,
+  createSession,
+} from "./api";
+import type {
+  AgentId,
+  RunState,
+  LLMHealth,
+  DiversifyRequest,
+  RankingProfile,
+} from "./types";
 
 const EMPTY: RunState = {
   status: "idle",
@@ -174,10 +188,10 @@ export default function App() {
     }, 50);
   }, []);
 
-  const approve = useCallback(async () => {
+  const approve = useCallback(async (rankingProfile: RankingProfile) => {
     if (mode === "live" && runIdRef.current) {
       try {
-        await approveRun(runIdRef.current);
+        await approveRun(runIdRef.current, rankingProfile);
       } catch {
         /* surfaced below via status */
       }
@@ -200,6 +214,16 @@ export default function App() {
       }));
     }
   }, [mode, apply]);
+
+  const rerankAtGate = useCallback(async (rankingProfile: RankingProfile) => {
+    if (mode !== "live" || !runIdRef.current) return;
+    const data = await rerankRun(runIdRef.current, rankingProfile);
+    setRun((s) => ({
+      ...s,
+      ranked: data.ranked,
+      funnel: { ...s.funnel, ranked: data.ranked.length },
+    }));
+  }, [mode]);
 
   const download = useCallback(
     (kind: "csv" | "sdf" | "report" | "traces") => {
@@ -307,6 +331,7 @@ export default function App() {
                 exported={run.status === "exported"}
                 onApprove={approve}
                 onDiversify={runDiversifyLoop}
+                onRankingProfileChange={rerankAtGate}
                 canDiversify={mode === "live"}
                 onDownload={download}
               />

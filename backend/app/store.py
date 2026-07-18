@@ -27,6 +27,7 @@ class Run:
     citations: list = field(default_factory=list)
     grounding: dict | None = None  # PMID-grounding report from build_dossier
     metric: dict | None = None
+    ranking_profile: str = "balanced"  # balanced | quality | explore | strict
     diversify_mode: str = "scaffold"  # off | scaffold | mmr | cluster (operator choice)
     diversify_lambda: float = 0.7  # MMR quality/spread trade-off (1=quality, 0=spread)
     diversify_cluster_cutoff: float = 0.35  # Butina distance cutoff when mode=cluster

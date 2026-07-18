@@ -49,6 +49,7 @@ export interface Metric {
 
 // Chemotype-diversity selection applied by the Diversifier agent.
 export type DiversityMode = "off" | "scaffold" | "mmr" | "cluster";
+export type RankingProfile = "balanced" | "quality" | "explore" | "strict";
 
 export interface DiversityStats {
   mode: DiversityMode;
@@ -65,6 +66,7 @@ export interface DiversifyRequest {
   lam?: number;
   cutoff?: number;
   maxGenerated: number;
+  rankingProfile?: RankingProfile;
 }
 
 // Citation-grounding report from the Knowledge agent's dossier build.

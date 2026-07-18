@@ -1,21 +1,30 @@
 import { useState } from "react";
 import { ShieldCheck, Download, Check, ListTree } from "lucide-react";
-import type { DiversityMode, DiversifyRequest } from "../types";
+import type { DiversityMode, DiversifyRequest, RankingProfile } from "../types";
 
 interface Props {
   exported: boolean;
-  onApprove: () => void;
+  onApprove: (rankingProfile: RankingProfile) => void;
   onDiversify: (req: DiversifyRequest) => Promise<void> | void;
+  onRankingProfileChange: (rankingProfile: RankingProfile) => Promise<void> | void;
   canDiversify: boolean;
   onDownload: (kind: "csv" | "sdf" | "report" | "traces") => void;
 }
 
-export default function ApproveBar({ exported, onApprove, onDiversify, canDiversify, onDownload }: Props) {
+export default function ApproveBar({
+  exported,
+  onApprove,
+  onDiversify,
+  onRankingProfileChange,
+  canDiversify,
+  onDownload,
+}: Props) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<DiversityMode>("scaffold");
   const [lam, setLam] = useState(0.7);
   const [cutoff, setCutoff] = useState(0.35);
   const [maxGenerated, setMaxGenerated] = useState(200);
+  const [rankingProfile, setRankingProfile] = useState<RankingProfile>("balanced");
   const [busy, setBusy] = useState(false);
 
   const submitDiversify = async () => {
@@ -24,6 +33,7 @@ export default function ApproveBar({ exported, onApprove, onDiversify, canDivers
       const req: DiversifyRequest = {
         mode,
         maxGenerated,
+        rankingProfile,
       };
       if (mode === "mmr") req.lam = lam;
       if (mode === "cluster") req.cutoff = cutoff;
@@ -31,6 +41,21 @@ export default function ApproveBar({ exported, onApprove, onDiversify, canDivers
       setOpen(false);
     } catch (err) {
       alert(`Couldn't start diversification rerun: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const changeRankingProfile = async (next: RankingProfile) => {
+    const prev = rankingProfile;
+    setRankingProfile(next);
+    if (exported) return;
+    setBusy(true);
+    try {
+      await onRankingProfileChange(next);
+    } catch (err) {
+      setRankingProfile(prev);
+      alert(`Couldn't rerank shortlist: ${String(err)}`);
     } finally {
       setBusy(false);
     }
@@ -60,9 +85,6 @@ export default function ApproveBar({ exported, onApprove, onDiversify, canDivers
               >
                 Diversify &amp; rerun
               </button>
-              <button className="btn primary" onClick={onApprove}>
-                <Check size={15} strokeWidth={2.5} /> Approve &amp; export
-              </button>
             </>
           ) : (
             <>
@@ -81,12 +103,43 @@ export default function ApproveBar({ exported, onApprove, onDiversify, canDivers
             </>
           )}
         </div>
+
+        {!exported && (
+          <div className="approve-ranking-row">
+            <label>
+              Ranking profile for final shortlist
+              <select
+                value={rankingProfile}
+                onChange={(e) => void changeRankingProfile(e.target.value as RankingProfile)}
+                disabled={busy}
+              >
+                <option value="balanced">Balanced (default)</option>
+                <option value="quality">Quality (similarity-focused)</option>
+                <option value="explore">Explore (novelty-friendly)</option>
+                <option value="strict">Strict (drug-likeness penalties)</option>
+              </select>
+            </label>
+            <button className="btn primary" onClick={() => onApprove(rankingProfile)} disabled={busy}>
+              <Check size={15} strokeWidth={2.5} /> Approve &amp; export
+            </button>
+          </div>
+        )}
       </div>
 
       {open && (
         <div className="div-modal-wrap" role="dialog" aria-modal="true" aria-label="Diversify and rerun settings">
           <div className="div-modal">
             <h4>Diversify &amp; rerun settings</h4>
+
+            <label>
+              Ranking profile
+              <select value={rankingProfile} onChange={(e) => setRankingProfile(e.target.value as RankingProfile)}>
+                <option value="balanced">Balanced (default)</option>
+                <option value="quality">Quality (similarity-focused)</option>
+                <option value="explore">Explore (novelty-friendly)</option>
+                <option value="strict">Strict (drug-likeness penalties)</option>
+              </select>
+            </label>
 
             <label>
               Method
@@ -147,6 +200,7 @@ export default function ApproveBar({ exported, onApprove, onDiversify, canDivers
           </div>
         </div>
       )}
+
     </>
   );
 }

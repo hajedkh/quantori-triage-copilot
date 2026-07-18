@@ -11,6 +11,7 @@ molecules + active fingerprints inside each process (once, via initializer).
 
 from __future__ import annotations
 import multiprocessing as mp
+import math
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from rdkit import Chem, RDLogger
@@ -641,9 +642,36 @@ def screen_parallel(
         one_shot.shutdown()
 
 
-def _confidence(score: float, sim: float, lipinski_pass: bool) -> str:
-    """Confidence bucket using BOTH the composite score and similarity.
-    Score and confidence now agree — a High compound always outscores a Medium."""
+def _confidence(
+    score: float,
+    sim: float,
+    lipinski_pass: bool,
+    policy: str = "balanced",
+) -> str:
+    """Confidence bucket using score + similarity with policy-specific gates."""
+    policy = (policy or "balanced").lower()
+    if policy == "strict":
+        if score >= 0.62 and sim >= 0.55 and lipinski_pass:
+            return "High"
+        if score >= 0.38 and sim >= 0.30 and lipinski_pass:
+            return "Medium"
+        return "Low"
+
+    if policy == "explore":
+        if score >= 0.52 and sim >= 0.40 and lipinski_pass:
+            return "High"
+        if score >= 0.25 and sim >= 0.18:
+            return "Medium"
+        return "Low"
+
+    if policy == "quality":
+        if score >= 0.58 and sim >= 0.52 and lipinski_pass:
+            return "High"
+        if score >= 0.34 and sim >= 0.28:
+            return "Medium"
+        return "Low"
+
+    # balanced (default)
     if score >= 0.55 and sim >= 0.50 and lipinski_pass:
         return "High"
     if score >= 0.30 and sim >= 0.25:
@@ -661,8 +689,63 @@ DEFAULT_WEIGHTS = {
     "penalty_pains": 0.03,  # per PAINS alert (graduated, not binary)
 }
 
+RANKING_PROFILES = {
+    "balanced": {
+        "weights": {**DEFAULT_WEIGHTS},
+        "score_mode": "enhanced",
+        "confidence_policy": "balanced",
+    },
+    "quality": {
+        "weights": {
+            **DEFAULT_WEIGHTS,
+            "similarity": 0.48,
+            "breadth": 0.18,
+            "qed": 0.18,
+            "sa": 0.10,
+        },
+        "score_mode": "enhanced",
+        "confidence_policy": "quality",
+    },
+    "explore": {
+        "weights": {
+            **DEFAULT_WEIGHTS,
+            "similarity": 0.30,
+            "breadth": 0.24,
+            "qed": 0.16,
+            "sa": 0.12,
+            "penalty_lipinski": 0.04,
+            "penalty_pains": 0.02,
+        },
+        "score_mode": "enhanced",
+        "confidence_policy": "explore",
+    },
+    "strict": {
+        "weights": {
+            **DEFAULT_WEIGHTS,
+            "similarity": 0.38,
+            "breadth": 0.14,
+            "qed": 0.20,
+            "sa": 0.14,
+            "penalty_lipinski": 0.08,
+            "penalty_pains": 0.05,
+        },
+        "score_mode": "enhanced",
+        "confidence_policy": "strict",
+    },
+}
 
-def compute_score(s: dict, weights: dict | None = None) -> float:
+
+def resolve_ranking_profile(profile: str | None) -> dict:
+    key = (profile or "balanced").lower()
+    return RANKING_PROFILES.get(key, RANKING_PROFILES["balanced"])
+
+
+def compute_score(
+    s: dict,
+    weights: dict | None = None,
+    score_mode: str = "classic",
+    uncertainty_penalty: float = 0.02,
+) -> float:
     """Compute the composite triage score for a survivor dict.
 
     score = w_sim × max_similarity
@@ -676,11 +759,40 @@ def compute_score(s: dict, weights: dict | None = None) -> float:
 
     sim = s["max_similarity"]
     breadth = s.get("top_k_avg", sim)  # fallback to max if profile missing
-    qed = s["qed"] if s.get("qed") is not None else 0.0
+    missing_count = 0
+    if s.get("qed") is None:
+        qed = 0.45
+        missing_count += 1
+    else:
+        qed = s["qed"]
     sa = s.get("sa_score")
-    sa_term = (1.0 - sa) if sa is not None else 0.5  # neutral if unavailable
+    if sa is None:
+        sa_term = 0.5
+        missing_count += 1
+    else:
+        sa_term = 1.0 - sa
     n_viol = len(s.get("lipinski_violations", []))
     n_pains = s.get("n_pains_alerts", 1 if s.get("pains_flag") else 0)
+
+    mode = (score_mode or "classic").lower()
+    if mode == "enhanced":
+        # Saturate very-high similarities so one analog series doesn't dominate.
+        sim_term = 1.0 - math.exp(-2.2 * max(0.0, sim))
+        breadth_term = 1.0 - math.exp(-1.8 * max(0.0, breadth))
+        lip_pen = w["penalty_lipinski"] * (n_viol**1.2)
+        pains_pen = w["penalty_pains"] * (n_pains**1.35)
+        raw = (
+            w["similarity"] * sim_term
+            + w["breadth"] * breadth_term
+            + w["qed"] * qed
+            + w["sa"] * sa_term
+            - lip_pen
+            - pains_pen
+            - uncertainty_penalty * missing_count
+        )
+        # Map raw score to a stable 0-1 range with smoother tails.
+        cal = 1.0 / (1.0 + math.exp(-(raw - 0.32) / 0.14))
+        return round(max(0.0, min(cal, 1.0)), 3)
 
     raw = (
         w["similarity"] * sim
@@ -967,13 +1079,22 @@ def rank(
     top_n: int = 600,
     weights: dict | None = None,
     diversity: bool = True,
+    profile: str = "balanced",
 ) -> list[dict]:
     """Score, bucket confidence, drop Low, diversity-rerank, assign ranks."""
+    profile_cfg = resolve_ranking_profile(profile)
+    merged_weights = {
+        **profile_cfg["weights"],
+        **(weights or {}),
+    }
+    score_mode = profile_cfg["score_mode"]
+    confidence_policy = profile_cfg["confidence_policy"]
+
     scored = []
     for s in survivors:
-        score = compute_score(s, weights)
+        score = compute_score(s, merged_weights, score_mode=score_mode)
         sim = s["max_similarity"]
-        conf = _confidence(score, sim, s["lipinski_pass"])
+        conf = _confidence(score, sim, s["lipinski_pass"], confidence_policy)
         if conf == "Low":
             continue
         idx = (
@@ -996,6 +1117,9 @@ def rank(
                 "max_similarity": sim,
                 "scaffold": s.get("scaffold", ""),
                 "sa_score": s.get("sa_score"),
+                "is_diversified_generated": bool(
+                    s.get("is_diversified_generated", False)
+                ),
                 "is_known_active": (
                     bool(s.get("label")) if s.get("label") is not None else False
                 ),

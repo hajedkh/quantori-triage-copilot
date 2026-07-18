@@ -242,6 +242,10 @@ async def cheminformatics(run):
 # ---------------- Critic / Ranking (real tool-calling agent) ----------------
 async def critic(run):
     emit(run, {"type": "agent_start", "agent": "critic"})
+    # Force each critic pass to produce a fresh ranking from current survivors.
+    # If the model skips rank_survivors, deterministic fallback will now run
+    # instead of silently reusing a stale run.ranked from a prior pass.
+    run.ranked = []
     emit(
         run,
         {
@@ -294,7 +298,7 @@ async def critic(run):
 
     cfg = llm.get_active_config()  # whatever provider/model is selected in the UI
 
-    raw = await loop.run_tool_loop(
+    await loop.run_tool_loop(
         run, "critic", system_prompt, user_msg, tools.CRITIC_TOOLS, executor, cfg=cfg
     )
 
@@ -332,7 +336,11 @@ async def critic(run):
                 "payload": "Agent never produced a ranking — falling back to deterministic chem.rank().",
             },
         )
-        ranked = chem.rank(run.survivors, run.active_ids)
+        ranked = chem.rank(
+            run.survivors,
+            run.active_ids,
+            profile=getattr(run, "ranking_profile", "balanced"),
+        )
         run.ranked = ranked
 
     n_in = (run.screen_stats or {}).get("input", len(run.candidates))
