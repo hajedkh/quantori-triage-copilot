@@ -15,16 +15,40 @@ The system is split into:
 
 Given a target and a candidate library, the app:
 
-1. Resolves the target and gathers known-active/literature context.
+1. Resolves the target and gathers known-active/literature context from
+   **ChEMBL** (known active compounds for the target) and **PubMed**
+   (cited abstracts for the dossier).
 2. Screens compounds using RDKit filters (parse validity, Lipinski, PAINS).
-3. Scores and ranks survivors with selectable ranking profiles.
+3. Scores survivors with a weighted formula — similarity to known actives,
+   multi-active coverage, drug-likeness (QED), synthetic accessibility, and
+   penalties for Lipinski/PAINS violations — then ranks them. The weighting
+   is controlled by a selectable **ranking profile** (balanced, quality,
+   explore, strict), and an optional diversity pass (scaffold, MMR, or
+   clustering) can re-select the shortlist for chemotype spread instead of
+   pure score order.
 4. Pauses at a human approval gate.
-5. Exports artifacts only after approval:
+5. Exports artifacts only after approval, cross-referencing the shortlist
+   against **PubChem**:
 	1. `shortlist.csv`
 	2. `shortlist.sdf` (with 3D conformers)
 	3. `report.md`
 
 At the gate, operators can rerank, diversify, and rerun triage before export.
+
+## Agents
+
+| Agent | Type | What it does |
+|---|---|---|
+| Supervisor | Deterministic (no LLM) | Resolves the target name to a ChEMBL ID and kicks off the run. |
+| Knowledge | LLM (single call) | Writes a cited target dossier from PubMed abstracts — one-shot generation, no tools. |
+| Cheminformatics | Agentic (LLM + tools) | Autonomously decides filter thresholds (Lipinski, PAINS, similarity) and iterates until the survivor set looks right. |
+| Critic | Agentic (LLM + tools) | Chooses scoring weights and ranks survivors. The model picks strategy; every number (similarity, QED, score) is always computed by RDKit, never the model. |
+| Diversifier | Deterministic (no LLM) | Re-selects the shortlist for chemotype diversity and generates new candidate molecules via BRICS fragment recombination. |
+| Chat Copilot | Agentic (LLM + tools) | Answers questions and previews/applies gate-time changes (rerank, focus scaffold, diversify) using the same tool-calling engine as the pipeline agents. Cannot start a run itself. |
+
+## Sequence Flow
+
+![Sequence diagram](./sequence.png)
 
 ## Repository Layout
 
@@ -58,39 +82,8 @@ Default provider setup supports:
 
 ### Optional: Local LLM with Ollama
 
-If you want to run the copilot fully local, you must install Ollama and pull a
-model before starting the backend.
-
-1. Install Ollama:
-	1. macOS: `brew install ollama` or download from `https://ollama.com`
-2. Start Ollama service:
-
-```bash
-ollama serve
-```
-
-3. Pull at least one model (example):
-
-```bash
-ollama pull llama3.1:8b
-```
-
-4. Set `.env` for local mode (example values):
-
-```bash
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://localhost:11434/v1
-OLLAMA_MODEL=llama3.1:8b
-```
-
-5. Quick check that model is available:
-
-```bash
-ollama list
-```
-
-If Ollama is not running or no model is pulled, LIVE chat/agent steps that use
-the LLM will fail.
+To run the copilot fully local, install Ollama and pull a model first — see
+the official installation guide: https://ollama.com/download
 
 ### 2) Start backend
 
@@ -192,6 +185,10 @@ Approved runs are saved under `backend/runs/<run_id>/` with:
 2. Frontend details: `frontend/README.md`
 
 ## Technology Stack
+
+A FastAPI + LangGraph + RDKit backend orchestrates the agents and the
+chemistry, paired with a React + TypeScript + Vite frontend that streams
+progress live over SSE — no polling, no page reloads.
 
 Backend:
 
