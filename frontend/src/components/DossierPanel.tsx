@@ -1,6 +1,5 @@
 import { Sparkles } from "lucide-react";
 import type { Citation } from "../types";
-import BrandSpinner from "./BrandSpinner";
 
 interface Props {
   text: string;
@@ -43,7 +42,7 @@ export default function DossierPanel({ text, citations, streaming }: Props) {
     <div className="panel">
       <div className="dossier">
         <div className="writing">
-          {streaming ? <BrandSpinner size={13} label="writing" /> : <Sparkles size={12} />}
+          <Sparkles size={12} />
           {streaming ? "Knowledge agent writing…" : "Target dossier · grounded in retrieved literature"}
         </div>
         <div className="dossier-body">

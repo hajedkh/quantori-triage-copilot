@@ -42,7 +42,6 @@ export default function ResultsTable({ ranked }: Props) {
             <div key={m.rank}>
               <div
                 className={"rrow data" + (isOpen ? " open" : "")}
-                data-rank={m.rank}
                 onClick={() => setOpen(isOpen ? null : m.rank)}
                 role="button"
                 tabIndex={0}
