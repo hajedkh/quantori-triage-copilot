@@ -20,6 +20,8 @@ from rdkit.Chem import BRICS
 from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
+from .config import load_chem_config
+
 # SA Score lives in rdkit.Contrib — path varies by installation.
 try:
     from rdkit.Chem import RDConfig
@@ -38,8 +40,10 @@ _pains_params = FilterCatalogParams()
 _pains_params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS)
 _PAINS = FilterCatalog(_pains_params)
 
+_CHEM_CFG = load_chem_config()
+
 # Minimum candidate count before spawning a pool is worthwhile.
-_PARALLEL_THRESHOLD = 500
+_PARALLEL_THRESHOLD = _CHEM_CFG.parallel_threshold
 
 # ---- Worker-process state (set by _init_worker, used by _process_one) ----
 _w_active_fps: list = []
@@ -550,7 +554,7 @@ def _aggregate(results: list[dict]) -> tuple[list[dict], dict, list[str]]:
 
 # Small batches give good load balancing (fast workers get the next batch
 # immediately via as_completed) without excessive IPC overhead.
-_BATCH_SIZE = 64
+_BATCH_SIZE = _CHEM_CFG.batch_size
 
 
 class ScreenPool:
@@ -567,7 +571,7 @@ class ScreenPool:
     """
 
     def __init__(self, active_smiles: list[str], n_workers: int | None = None):
-        self._n_workers = n_workers or min(mp.cpu_count(), 8)
+        self._n_workers = n_workers or min(mp.cpu_count(), _CHEM_CFG.max_workers_cap)
         self._active_smiles = active_smiles
         self._pool: ProcessPoolExecutor | None = None
 

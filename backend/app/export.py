@@ -21,8 +21,11 @@ from rdkit import Chem
 # Import chem for extended_descriptors — resolve relative or absolute
 try:
     from . import chem
+    from .config import load_export_config
 except ImportError:
     import chem  # type: ignore
+
+    from config import load_export_config  # type: ignore
 
 
 # ---- Column groups for the comprehensive CSV ----
@@ -81,12 +84,7 @@ _CSV_COLUMNS = [
 
 _CHEMBL = "https://www.ebi.ac.uk/chembl/api/data"
 _PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
-
-_XREF_TIMEOUT = 4
-_XREF_BUDGET_SECONDS = 18.0
-_XREF_TOP_LIMIT = 250
-_XREF_PROBE_N = 8
-_XREF_WORKERS = 16
+_EXPORT_CFG = load_export_config()
 
 
 def _notify_progress(callback, stage: str, message: str) -> None:
@@ -178,7 +176,7 @@ def _lookup_chembl_id(inchikey: str) -> str:
         r = requests.get(
             f"{_CHEMBL}/molecule.json",
             params={"molecule_structures__standard_inchi_key": inchikey, "limit": 1},
-            timeout=_XREF_TIMEOUT,
+            timeout=_EXPORT_CFG.xref_timeout_seconds,
         )
         r.raise_for_status()
         molecules = r.json().get("molecules", [])
@@ -195,7 +193,7 @@ def _lookup_pubchem_cid(inchikey: str) -> str:
     try:
         r = requests.get(
             f"{_PUBCHEM}/compound/inchikey/{quote(inchikey)}/cids/JSON",
-            timeout=_XREF_TIMEOUT,
+            timeout=_EXPORT_CFG.xref_timeout_seconds,
         )
         r.raise_for_status()
         cids = r.json().get("IdentifierList", {}).get("CID", [])
@@ -223,17 +221,17 @@ def _xref_one(row: dict) -> tuple[str, dict]:
 
 def _decide_xref_scope(rows: list[dict]) -> tuple[int, dict]:
     n = len(rows)
-    if n <= _XREF_TOP_LIMIT:
+    if n <= _EXPORT_CFG.xref_top_limit:
         return n, {
             "mode": "all",
-            "reason": "<= top-50 shortlist size",
+            "reason": "<= configured shortlist query limit",
             "projected_seconds": 0.0,
         }
 
-    sample_n = min(_XREF_PROBE_N, n)
+    sample_n = min(_EXPORT_CFG.xref_probe_n, n)
     sample_rows = rows[:sample_n]
     start = time.perf_counter()
-    workers = max(1, min(_XREF_WORKERS, sample_n))
+    workers = max(1, min(_EXPORT_CFG.xref_workers, sample_n))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(_xref_one, r) for r in sample_rows]
         for f in as_completed(futures):
@@ -245,8 +243,8 @@ def _decide_xref_scope(rows: list[dict]) -> tuple[int, dict]:
     avg_per_compound = elapsed / sample_n
     projected = avg_per_compound * n
 
-    if projected > _XREF_BUDGET_SECONDS:
-        return _XREF_TOP_LIMIT, {
+    if projected > _EXPORT_CFG.xref_budget_seconds:
+        return _EXPORT_CFG.xref_top_limit, {
             "mode": "top50",
             "reason": "projected API time too long",
             "projected_seconds": round(projected, 2),
@@ -284,7 +282,7 @@ def _crossref_rows(rows: list[dict], progress_callback=None) -> tuple[list[dict]
         "Checking ChEMBL and PubChem for selected structures.",
     )
     by_smiles: dict[str, dict] = {}
-    workers = max(1, min(_XREF_WORKERS, len(scoped)))
+    workers = max(1, min(_EXPORT_CFG.xref_workers, len(scoped)))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(_xref_one, r) for r in scoped]
         for f in as_completed(futures):
@@ -384,11 +382,6 @@ def _embed_3d(mol):
     return mol
 
 
-# Below this count, spinning up a process pool costs more than it saves, so
-# embedding runs serially instead.
-_PARALLEL_MIN = 4
-
-
 def _embed_worker(smiles: str) -> tuple[str | None, str]:
     """Process-pool worker: parse a SMILES and generate a 3D conformer.
 
@@ -421,7 +414,9 @@ def _embed_all(
     if not gen_3d:
         return [(None, "2D_only")] * n
 
-    serial = n < _PARALLEL_MIN or (max_workers is not None and max_workers <= 1)
+    serial = n < _EXPORT_CFG.embed_parallel_min or (
+        max_workers is not None and max_workers <= 1
+    )
     if not serial:
         workers = max_workers or min(os.cpu_count() or 1, n)
         if workers > 1:

@@ -8,10 +8,11 @@ from __future__ import annotations
 import requests
 import xml.etree.ElementTree as ET
 from .data.fallback import TARGET_ALIASES, FALLBACK_ACTIVES
+from .config import load_sources_config
 
 CHEMBL = "https://www.ebi.ac.uk/chembl/api/data"
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-TIMEOUT = 6
+_SOURCES_CFG = load_sources_config()
 
 
 def resolve_target(name: str) -> tuple[str, str]:
@@ -23,7 +24,7 @@ def resolve_target(name: str) -> tuple[str, str]:
         r = requests.get(
             f"{CHEMBL}/target/search.json",
             params={"q": name, "limit": 1},
-            timeout=TIMEOUT,
+            timeout=_SOURCES_CFG.timeout_seconds,
         )
         r.raise_for_status()
         targets = r.json().get("targets", [])
@@ -35,8 +36,11 @@ def resolve_target(name: str) -> tuple[str, str]:
     return TARGET_ALIASES.get(key, ("CHEMBL203", name))
 
 
-def get_known_actives(target_id: str, limit: int = 60) -> tuple[list[str], list[str]]:
+def get_known_actives(
+    target_id: str, limit: int | None = None
+) -> tuple[list[str], list[str]]:
     """Return (smiles_list, chembl_id_list) of proven binders (pChEMBL >= 6)."""
+    limit = limit or _SOURCES_CFG.known_actives_limit
     try:
         r = requests.get(
             f"{CHEMBL}/activity.json",
@@ -45,7 +49,7 @@ def get_known_actives(target_id: str, limit: int = 60) -> tuple[list[str], list[
                 "pchembl_value__gte": 6,
                 "limit": limit,
             },
-            timeout=TIMEOUT,
+            timeout=_SOURCES_CFG.timeout_seconds,
         )
         r.raise_for_status()
         acts = r.json().get("activities", [])
@@ -66,8 +70,9 @@ def get_known_actives(target_id: str, limit: int = 60) -> tuple[list[str], list[
     return fb, [f"{target_id}-A{i}" for i in range(len(fb))]
 
 
-def pubmed_abstracts(term: str, retmax: int = 6) -> list[dict]:
+def pubmed_abstracts(term: str, retmax: int | None = None) -> list[dict]:
     """Fetch a few PubMed abstracts for the dossier. Returns [{pmid,title,abstract}]."""
+    retmax = retmax or _SOURCES_CFG.pubmed_retmax
     try:
         s = requests.get(
             f"{EUTILS}/esearch.fcgi",
@@ -77,7 +82,7 @@ def pubmed_abstracts(term: str, retmax: int = 6) -> list[dict]:
                 "retmax": retmax,
                 "retmode": "json",
             },
-            timeout=TIMEOUT,
+            timeout=_SOURCES_CFG.timeout_seconds,
         )
         s.raise_for_status()
         ids = s.json().get("esearchresult", {}).get("idlist", [])
@@ -91,15 +96,15 @@ def pubmed_abstracts(term: str, retmax: int = 6) -> list[dict]:
                 "rettype": "abstract",
                 "retmode": "xml",
             },
-            timeout=TIMEOUT,
+            timeout=_SOURCES_CFG.timeout_seconds,
         )
         f.raise_for_status()
-        return _parse_pubmed_xml(f.text) or _fallback_abstracts(term)
+        return _parse_pubmed_xml(f.text, retmax=retmax) or _fallback_abstracts(term)
     except Exception:
         return _fallback_abstracts(term)
 
 
-def _parse_pubmed_xml(xml: str) -> list[dict]:
+def _parse_pubmed_xml(xml: str, retmax: int | None = None) -> list[dict]:
     out = []
     try:
         root = ET.fromstring(xml)
@@ -113,7 +118,8 @@ def _parse_pubmed_xml(xml: str) -> list[dict]:
                 )
     except Exception:
         return []
-    return out[:6]
+    cap = retmax or _SOURCES_CFG.pubmed_retmax
+    return out[:cap]
 
 
 def _fallback_abstracts(term: str) -> list[dict]:
