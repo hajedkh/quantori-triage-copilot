@@ -1,12 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import Header from "./components/Header";
 import SetupPanel from "./components/SetupPanel";
 import PipelineRail from "./components/PipelineRail";
 import OutputTabs from "./components/OutputTabs";
 import ApproveBar from "./components/ApproveBar";
-import ChatPanel from "./components/ChatPanel";
 import { runMockStream, buildCsv, type StreamEvent } from "./mock";
-import { startRun, subscribe, approveRun, downloadUrl, createSession } from "./api";
+import { startRun, subscribe, approveRun, downloadUrl } from "./api";
 import type { AgentId, RunState, LLMHealth } from "./types";
 
 const EMPTY: RunState = {
@@ -22,7 +21,6 @@ const EMPTY: RunState = {
   targetName: "",
   targetId: "",
   toolTrace: { supervisor: [], knowledge: [], cheminformatics: [], critic: [] },
-  fullTrace: { supervisor: [], knowledge: [], cheminformatics: [], critic: [] },
 };
 
 const TRACE_CAP = 8;
@@ -41,24 +39,6 @@ export default function App() {
   });
   const runIdRef = useRef<string | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
-  const [chatRunId, setChatRunId] = useState<string | null>(null);
-  const [lastSteerAck, setLastSteerAck] = useState<{ message: string; ts: number } | null>(null);
-
-  // The chat is present from the very first screen, so it needs a run_id
-  // before any target/library/pipeline exists.
-  useEffect(() => {
-    let cancelled = false;
-    createSession()
-      .then(({ runId }) => {
-        if (!cancelled) setChatRunId(runId);
-      })
-      .catch(() => {
-        /* chat just stays disabled if this fails — rest of the app is unaffected */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   // Single event handler for both mock and live streams.
   const apply = useCallback((e: StreamEvent) => {
@@ -107,8 +87,6 @@ export default function App() {
             ...s.toolTrace,
             [agentId]: [...prevTrace, e.payload].slice(-TRACE_CAP),
           };
-          const prevFull = s.fullTrace[agentId] || [];
-          next.fullTrace = { ...s.fullTrace, [agentId]: [...prevFull, e.payload] };
           break;
         }
       }
@@ -117,9 +95,6 @@ export default function App() {
 
     // Auto-switch to shortlist tab when results land.
     if (e.type === "ranked") setTab("shortlist");
-    // The chat's steer messages are only "confirmed" once this event lands
-    // on the pipeline's own SSE stream — see ChatPanel's pendingSteer.
-    if (e.type === "steer") setLastSteerAck({ message: e.payload, ts: Date.now() });
   }, []);
 
   const start = useCallback(async () => {
@@ -136,9 +111,6 @@ export default function App() {
         const { runId } = await startRun(target, file);
         runIdRef.current = runId;
         unsubRef.current = subscribe(runId, apply);
-        // Point the chat at whichever run is actually live, regardless of
-        // which path (this form, or the chat's own start_run) started it.
-        setChatRunId(runId);
       } catch (err) {
         setRun((s) => ({
           ...s,
@@ -148,18 +120,6 @@ export default function App() {
       }
     }
   }, [mode, target, file, apply]);
-
-  const onCiteRank = useCallback((rank: number) => {
-    setTab("shortlist");
-    window.setTimeout(() => {
-      const el = document.querySelector(`[data-rank="${rank}"]`);
-      if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        el.classList.add("cite-flash");
-        window.setTimeout(() => el.classList.remove("cite-flash"), 1500);
-      }
-    }, 50);
-  }, []);
 
   const approve = useCallback(async () => {
     if (mode === "live" && runIdRef.current) {
@@ -173,25 +133,7 @@ export default function App() {
   }, [mode]);
 
   const download = useCallback(
-    (kind: "csv" | "sdf" | "report" | "traces") => {
-      // Traces are assembled from state already on the client (received live
-      // over SSE in both modes) — no backend round-trip either way, unlike
-      // csv/sdf/report which are files the backend writes on approval.
-      if (kind === "traces") {
-        const payload = {
-          target: run.targetName,
-          generated_at: new Date().toISOString(),
-          agents: run.fullTrace,
-        };
-        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${run.targetName || "target"}_traces.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        return;
-      }
+    (kind: "csv" | "sdf" | "report") => {
       if (mode === "live" && runIdRef.current) {
         window.open(downloadUrl(runIdRef.current, kind), "_blank");
         return;
@@ -209,19 +151,8 @@ export default function App() {
         alert(`${kind.toUpperCase()} export is produced by the backend in live mode.`);
       }
     },
-    [mode, run.ranked, run.targetName, run.fullTrace]
+    [mode, run.ranked, run.targetName]
   );
-
-  // Logo/title in the header — abandons the client-side view of the current
-  // run (the backend run itself is left alone; there's no cancel endpoint)
-  // and drops back to the setup screen so a new triage can be started.
-  const goHome = useCallback(() => {
-    if (unsubRef.current) unsubRef.current();
-    unsubRef.current = null;
-    runIdRef.current = null;
-    setRun(EMPTY);
-    setTab("dossier");
-  }, []);
 
   const started = run.status !== "idle";
   const dossierStreaming = run.agents.knowledge === "running";
@@ -235,7 +166,7 @@ export default function App() {
 
   return (
     <>
-      <Header mode={mode} onMode={setMode} status={run.status} onHealthChange={setLlmHealth} onHome={goHome} />
+      <Header mode={mode} onMode={setMode} status={run.status} onHealthChange={setLlmHealth} />
       <main className="shell">
         {!started && (
           <SetupPanel
@@ -279,16 +210,6 @@ export default function App() {
             )}
           </>
         )}
-
-        {/* Same mounted instance throughout — docked below the form pre-run,
-            floating (fixed-position) once the pipeline starts. */}
-        <ChatPanel
-          runId={chatRunId}
-          status={run.status}
-          lastSteerAck={lastSteerAck}
-          onCiteRank={onCiteRank}
-          docked={!started}
-        />
       </main>
     </>
   );

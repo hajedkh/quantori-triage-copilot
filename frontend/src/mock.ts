@@ -15,7 +15,6 @@ export interface StreamEvent {
     | "ranked"
     | "metric"
     | "tool_call"
-    | "steer"
     | "awaiting_approval";
   agent?: LogEvent["agent"];
   payload?: any;
