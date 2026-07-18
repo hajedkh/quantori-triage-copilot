@@ -1,6 +1,14 @@
 import { useEffect, useRef } from "react";
 import { BookOpen, FlaskConical, ListChecks, Compass, Shuffle } from "lucide-react";
-import type { AgentId, AgentStatus, FunnelState, LogEvent, Metric, ToolCallEvent } from "../types";
+import type {
+  AgentId,
+  AgentStatus,
+  DiversityStats,
+  FunnelState,
+  LogEvent,
+  Metric,
+  ToolCallEvent,
+} from "../types";
 import FunnelMeter from "./FunnelMeter";
 import BrandSpinner from "./BrandSpinner";
 
@@ -8,6 +16,7 @@ interface Props {
   agents: Record<AgentId, AgentStatus>;
   funnel: FunnelState;
   metric: Metric | null;
+  diversity: DiversityStats | null;
   log: LogEvent[];
   toolTrace: Record<AgentId, ToolCallEvent[]>;
 }
@@ -20,7 +29,10 @@ const AGENTS: { id: AgentId; name: string; role: string; icon: JSX.Element }[] =
   { id: "diversifier", name: "Diversifier", role: "chemotype spread", icon: <Shuffle size={16} /> },
 ];
 
-export default function PipelineRail({ agents, funnel, metric, log, toolTrace }: Props) {
+export default function PipelineRail({ agents, funnel, metric, diversity, log, toolTrace }: Props) {
+  const latestDiversifierLog =
+    [...log].reverse().find((e) => e.agent === "diversifier")?.msg ?? null;
+
   return (
     <aside className="rail">
       <div className="panel">
@@ -45,6 +57,13 @@ export default function PipelineRail({ agents, funnel, metric, log, toolTrace }:
                     {st === "running" ? "active" : st === "done" ? "done" : "idle"}
                   </div>
                 </div>
+                {a.id === "diversifier" && (
+                  <DiversifierFeedback
+                    status={st}
+                    diversity={diversity}
+                    latestLog={latestDiversifierLog}
+                  />
+                )}
                 {trace.length > 0 && <ToolTrace trace={trace} />}
               </div>
             );
@@ -61,6 +80,70 @@ export default function PipelineRail({ agents, funnel, metric, log, toolTrace }:
         <TraceLog log={log} />
       </div>
     </aside>
+  );
+}
+
+const MODE_LABEL: Record<DiversityStats["mode"], string> = {
+  off: "Off",
+  scaffold: "Scaffold",
+  mmr: "MMR",
+  cluster: "Cluster",
+};
+
+function DiversifierFeedback({
+  status,
+  diversity,
+  latestLog,
+}: {
+  status: AgentStatus;
+  diversity: DiversityStats | null;
+  latestLog: string | null;
+}) {
+  if (!diversity && status === "idle") return null;
+
+  return (
+    <div className="div-feedback fadeup">
+      <div className="div-feedback-head">Diversifier feedback</div>
+      {diversity ? (
+        <>
+          <div className="div-feedback-grid">
+            <div className="df-kv">
+              <span>mode</span>
+              <b>{MODE_LABEL[diversity.mode] ?? diversity.mode}</b>
+            </div>
+            <div className="df-kv">
+              <span>selected</span>
+              <b>{diversity.n_selected}</b>
+            </div>
+            {diversity.n_scaffolds != null && (
+              <div className="df-kv">
+                <span>scaffolds</span>
+                <b>{diversity.n_scaffolds}</b>
+              </div>
+            )}
+            {diversity.n_clusters != null && (
+              <div className="df-kv">
+                <span>clusters</span>
+                <b>{diversity.n_clusters}</b>
+              </div>
+            )}
+            {diversity.mode === "mmr" && (
+              <div className="df-kv">
+                <span>lambda</span>
+                <b>{diversity.lambda.toFixed(2)}</b>
+              </div>
+            )}
+          </div>
+          {latestLog && <div className="div-feedback-note">{latestLog}</div>}
+        </>
+      ) : (
+        <div className="div-feedback-note">
+          {status === "running"
+            ? "Computing chemotype spread and re-selecting the shortlist..."
+            : "No diversity pass output yet."}
+        </div>
+      )}
+    </div>
   );
 }
 

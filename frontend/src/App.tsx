@@ -268,6 +268,7 @@ export default function App() {
                 agents={run.agents}
                 funnel={run.funnel}
                 metric={run.metric}
+                diversity={run.diversity}
                 log={run.log}
                 toolTrace={run.toolTrace}
               />
