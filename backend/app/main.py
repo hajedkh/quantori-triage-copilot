@@ -104,14 +104,26 @@ class RerankOut(BaseModel):
 async def start_run(
     target_name: str = Form(...),
     candidates: UploadFile = File(...),
+    ranking_profile: str = Form("balanced"),
 ):
     raw = await candidates.read()
     parsed = parse_candidates(raw)
     if not parsed:
         raise HTTPException(400, "No SMILES found in the uploaded file.")
+    # Never trust the client value blindly, even though the frontend only
+    # ever sends one of these four (a <select>, not free text) — same
+    # whitelist check already used by /rerank and /diversify.
+    ranking_profile = (ranking_profile or "balanced").strip().lower()
+    if ranking_profile not in ("balanced", "quality", "explore", "strict"):
+        raise HTTPException(400, f"unknown ranking profile: {ranking_profile!r}")
     run_id = uuid.uuid4().hex[:8]
     cfg = llm.get_active_config()
-    run = Run(id=run_id, target_name=target_name.strip(), candidates=parsed)
+    run = Run(
+        id=run_id,
+        target_name=target_name.strip(),
+        candidates=parsed,
+        ranking_profile=ranking_profile,
+    )
     run.provenance = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "model": cfg.model,
@@ -316,8 +328,10 @@ CHAT_SYSTEM_PROMPT = (
     "report it as queued. "
     "You cannot start a run yourself — there is no tool for it. If asked how "
     "to begin, how to run this, or to start/launch a screen, tell the "
-    "operator plainly: choose a target protein and upload a candidate "
-    "library in the form on this screen, then click Run triage."
+    "operator plainly: choose a target protein, upload a candidate library, "
+    "optionally pick a ranking profile (balanced/quality/explore/strict — "
+    "balanced is fine if unsure), then click Run triage, all in the form on "
+    "this screen."
 )
 
 

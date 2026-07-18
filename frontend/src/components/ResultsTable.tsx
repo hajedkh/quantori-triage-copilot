@@ -1,12 +1,16 @@
 import { useState } from "react";
-import { Star, ChevronDown, Shuffle, Eye, EyeOff } from "lucide-react";
+import { Star, ChevronDown, Shuffle, Eye, EyeOff, Box } from "lucide-react";
 import type { RankedMol, DiversityStats } from "../types";
 import MoleculeView from "./MoleculeView";
 import ConfidenceBadge from "./ConfidenceBadge";
+import Mol3DModal from "./Mol3DModal";
 
 interface Props {
   ranked: RankedMol[];
   diversity: DiversityStats | null;
+  // Only available in LIVE mode once a run exists — the 3D viewer needs a
+  // real backend/run to generate a conformer from. null in DEMO mode.
+  runId: string | null;
 }
 
 function scoreColor(conf: string) {
@@ -20,11 +24,16 @@ const DIVERSITY_LABEL: Record<string, string> = {
   cluster: "clustered",
 };
 
-export default function ResultsTable({ ranked, diversity }: Props) {
+export default function ResultsTable({ ranked, diversity, runId }: Props) {
   const [open, setOpen] = useState<number | null>(null);
   // Ground-truth labels stay hidden by default so the shortlist reads as a
   // real (unlabelled) triage; the operator can reveal the held-out actives.
   const [reveal, setReveal] = useState(false);
+  const [view3D, setView3D] = useState<number | null>(null);
+  // Set once, the first time molstar's own import fails — after that every
+  // row's 3D button disables itself instead of re-attempting a known-broken
+  // import on every click.
+  const [molstar3DBroken, setMolstar3DBroken] = useState(false);
 
   if (ranked.length === 0) {
     return (
@@ -115,6 +124,20 @@ export default function ResultsTable({ ranked, diversity }: Props) {
 
                 <div className="mol-cell">
                   <MoleculeView smiles={m.smiles} />
+                  {runId && (
+                    <button
+                      className="mol3d-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setView3D(m.rank);
+                      }}
+                      disabled={molstar3DBroken}
+                      title={molstar3DBroken ? "3D viewer unavailable" : "View 3D structure"}
+                      aria-label="View 3D structure"
+                    >
+                      <Box size={11} />
+                    </button>
+                  )}
                 </div>
 
                 <div style={{ minWidth: 0 }}>
@@ -153,6 +176,20 @@ export default function ResultsTable({ ranked, diversity }: Props) {
                 <div className="prov fadeup">
                   <div className="prov-mol">
                     <MoleculeView smiles={m.smiles} size={130} height={120} />
+                    {runId && (
+                      <button
+                        className="mol3d-btn mol3d-btn-lg"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setView3D(m.rank);
+                        }}
+                        disabled={molstar3DBroken}
+                        title={molstar3DBroken ? "3D viewer unavailable" : "View 3D structure"}
+                        aria-label="View 3D structure"
+                      >
+                        <Box size={16} />
+                      </button>
+                    )}
                   </div>
                   <div className="prov-facts">
                     <div className="prov-reason">{m.reason}</div>
@@ -182,6 +219,24 @@ export default function ResultsTable({ ranked, diversity }: Props) {
           );
         })}
       </div>
+
+      {view3D !== null &&
+        runId &&
+        (() => {
+          const mol = ranked.find((r) => r.rank === view3D);
+          if (!mol) return null;
+          return (
+            <Mol3DModal
+              runId={runId}
+              rank={view3D}
+              smiles={mol.smiles}
+              score={mol.score}
+              confidence={mol.confidence}
+              onClose={() => setView3D(null)}
+              onMolstarUnavailable={() => setMolstar3DBroken(true)}
+            />
+          );
+        })()}
     </div>
   );
 }
