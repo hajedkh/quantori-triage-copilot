@@ -141,6 +141,25 @@ export async function diversifyRun(runId: string, req: DiversifyRequest): Promis
   if (!res.ok) throw new Error(`diversify failed: ${res.status}`);
 }
 
+// GET /mol3d/{runId}/{rank} -> generated 3D conformer (MOL block) for the
+// on-demand Mol* viewer, or {ok:false} if this structure couldn't be
+// embedded. Never throws for a chemistry failure — only for a genuine
+// network/HTTP problem, which the caller treats the same as "unavailable".
+export interface Mol3DResult {
+  ok: boolean;
+  molblock?: string;
+}
+
+export async function getMol3D(runId: string, rank: number): Promise<Mol3DResult> {
+  try {
+    const res = await fetch(`/api/mol3d/${runId}/${rank}`);
+    if (!res.ok) return { ok: false };
+    return (await res.json()) as Mol3DResult;
+  } catch {
+    return { ok: false };
+  }
+}
+
 // Download URL for an exported artifact.
 export function downloadUrl(runId: string, kind: "csv" | "sdf" | "report") {
   return `/api/download/${runId}/${kind}`;

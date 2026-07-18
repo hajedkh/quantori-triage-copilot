@@ -421,6 +421,7 @@ export default function App() {
                 ranked={run.ranked}
                 grounding={run.grounding}
                 diversity={run.diversity}
+                runId={mode === "live" ? runIdRef.current : null}
               />
             </div>
 

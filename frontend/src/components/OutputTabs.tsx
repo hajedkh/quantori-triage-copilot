@@ -11,6 +11,7 @@ interface Props {
   ranked: RankedMol[];
   grounding: Grounding | null;
   diversity: DiversityStats | null;
+  runId: string | null;
 }
 
 export default function OutputTabs({
@@ -22,6 +23,7 @@ export default function OutputTabs({
   ranked,
   grounding,
   diversity,
+  runId,
 }: Props) {
   return (
     <div className="outputs">
@@ -39,7 +41,7 @@ export default function OutputTabs({
       {tab === "dossier" ? (
         <DossierPanel text={dossier} citations={citations} streaming={dossierStreaming} grounding={grounding} />
       ) : (
-        <ResultsTable ranked={ranked} diversity={diversity} />
+        <ResultsTable ranked={ranked} diversity={diversity} runId={runId} />
       )}
     </div>
   );

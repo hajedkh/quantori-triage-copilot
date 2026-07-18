@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from . import graph, llm, loop, chat_tools
+from . import graph, llm, loop, chat_tools, conformers
 from .store import Run, RUNS
 
 RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
@@ -239,6 +239,39 @@ async def download(run_id: str, kind: str):
     if not path.exists():
         raise HTTPException(404, "not exported yet - approve first")
     return FileResponse(path, filename=path.name)
+
+
+# ------------------------------------------------------------- 3D molecule view --
+# Purely additive, on-demand: nothing here runs during a triage run, nothing
+# here can affect the ranked table, the 2D depiction, or any export if it
+# fails — see conformers.py. Cached per (run_id, smiles) in memory, same
+# lifetime/style as RUNS itself, so re-opening a molecule doesn't re-embed.
+# Keyed by smiles, not rank: rank is mutable (rerank/diversify can put a
+# different molecule at the same rank), so a rank-only key would risk
+# serving a stale, wrong structure after the shortlist gets re-ranked.
+_mol3d_cache: dict[tuple[str, str], dict] = {}
+
+
+@app.get("/mol3d/{run_id}/{rank}")
+async def mol3d(run_id: str, rank: int):
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "run not found")
+    if rank < 1 or rank > len(run.ranked):
+        raise HTTPException(404, f"rank {rank} not found — only {len(run.ranked)} ranked results exist")
+
+    smiles = run.ranked[rank - 1]["smiles"]
+    cache_key = (run_id, smiles)
+    cached = _mol3d_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # CPU-bound RDKit work (embed + force-field optimization) — off the event
+    # loop so a slow/failing embed can't stall the SSE stream or other requests.
+    molblock = await asyncio.to_thread(conformers.to_molblock_3d, smiles)
+    result = {"ok": True, "molblock": molblock} if molblock is not None else {"ok": False}
+    _mol3d_cache[cache_key] = result
+    return result
 
 
 # ---------------------------------------------------------------- chat copilot --
