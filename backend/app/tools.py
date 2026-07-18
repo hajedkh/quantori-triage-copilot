@@ -15,10 +15,12 @@ by reference against these summaries, never against the full candidate list.
 from __future__ import annotations
 
 from . import chem
+from .config import load_tool_config
 from .store import emit
 
-_MAX_EXAMPLES = 3
-_MAX_BATCH = 10
+_TOOL_CFG = load_tool_config()
+_MAX_EXAMPLES = _TOOL_CFG.max_examples
+_MAX_BATCH = _TOOL_CFG.max_batch
 
 
 # ---------------------------------------------------------------- schemas --

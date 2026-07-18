@@ -242,7 +242,7 @@ export default function Header({ mode, onMode, status, onHealthChange, onHome }:
         </div>
 
         <div className="llm-ctl" title={demoLocked ? "Provider switching applies to LIVE runs." : undefined}>
-          <span className={dotClass} title={dotTitle} />
+          <span className={dotClass} title={`LLM health: ${dotTitle}`} />
           {provider === "gateway" ? (
             <img className="llm-logo" src={QUANTORI_LOGO} alt="" title="Quantori Litellm Gateway" />
           ) : (
@@ -254,6 +254,7 @@ export default function Header({ mode, onMode, status, onHealthChange, onHome }:
             value={provider}
             disabled={demoLocked}
             onChange={(e) => handleProviderChange(e.target.value as LLMProvider)}
+            title="Select LLM provider used for LIVE runs"
           >
             <option value="ollama">{PROVIDER_LABEL.ollama}</option>
             <option value="gateway">{PROVIDER_LABEL.gateway}</option>
@@ -262,6 +263,7 @@ export default function Header({ mode, onMode, status, onHealthChange, onHome }:
             value={model}
             disabled={demoLocked || currentModels.length === 0}
             onChange={(e) => handleModelChange(e.target.value)}
+            title="Select model for the chosen provider"
           >
             {currentModels.length === 0 ? (
               <option value="">no models available</option>
@@ -275,7 +277,7 @@ export default function Header({ mode, onMode, status, onHealthChange, onHome }:
           </select>
         </div>
 
-        <span className="status-pill">
+        <span className="status-pill" title="Current pipeline run status">
           <span className={dotClassStatus} />
           {STATUS_TEXT[status]}
         </span>

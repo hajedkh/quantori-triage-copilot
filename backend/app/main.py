@@ -29,10 +29,14 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from . import graph, llm, loop, chat_tools, conformers
+from .config import load_chat_config, load_diversify_config
 from .store import Run, RUNS
 
 RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
 RUNS_DIR.mkdir(exist_ok=True)
+
+_CHAT_CFG = load_chat_config()
+_DIVERSIFY_CFG = load_diversify_config()
 
 app = FastAPI(title="Target Triage Copilot")
 
@@ -182,14 +186,19 @@ async def diversify(run_id: str, body: DiversifyIn):
     if mode not in ("off", "scaffold", "mmr", "cluster"):
         raise HTTPException(400, f"unknown diversify mode: {body.mode!r}")
 
-    lam = 0.7 if body.lam is None else float(body.lam)
+    lam = _DIVERSIFY_CFG.default_lam if body.lam is None else float(body.lam)
     lam = max(0.0, min(1.0, lam))
 
-    cutoff = 0.35 if body.cutoff is None else float(body.cutoff)
+    cutoff = (
+        _DIVERSIFY_CFG.default_cutoff if body.cutoff is None else float(body.cutoff)
+    )
     cutoff = max(0.1, min(0.9, cutoff))
 
-    max_generated = int(body.maxGenerated or 200)
-    max_generated = max(1, min(5000, max_generated))
+    max_generated = int(body.maxGenerated or _DIVERSIFY_CFG.default_max_generated)
+    max_generated = max(
+        _DIVERSIFY_CFG.min_max_generated,
+        min(_DIVERSIFY_CFG.max_max_generated, max_generated),
+    )
 
     ranking_profile = (body.rankingProfile or "balanced").strip().lower()
     if ranking_profile not in ("balanced", "quality", "explore", "strict"):
@@ -258,7 +267,9 @@ async def mol3d(run_id: str, rank: int):
     if not run:
         raise HTTPException(404, "run not found")
     if rank < 1 or rank > len(run.ranked):
-        raise HTTPException(404, f"rank {rank} not found — only {len(run.ranked)} ranked results exist")
+        raise HTTPException(
+            404, f"rank {rank} not found — only {len(run.ranked)} ranked results exist"
+        )
 
     smiles = run.ranked[rank - 1]["smiles"]
     cache_key = (run_id, smiles)
@@ -269,7 +280,9 @@ async def mol3d(run_id: str, rank: int):
     # CPU-bound RDKit work (embed + force-field optimization) — off the event
     # loop so a slow/failing embed can't stall the SSE stream or other requests.
     molblock = await asyncio.to_thread(conformers.to_molblock_3d, smiles)
-    result = {"ok": True, "molblock": molblock} if molblock is not None else {"ok": False}
+    result = (
+        {"ok": True, "molblock": molblock} if molblock is not None else {"ok": False}
+    )
     _mol3d_cache[cache_key] = result
     return result
 
@@ -362,7 +375,8 @@ async def chat(run_id: str, body: ChatIn):
         raise HTTPException(404, "run not found")
 
     transcript = "".join(
-        f"{t['role']}: {t['content']}\n" for t in run.chat_history[-6:]
+        f"{t['role']}: {t['content']}\n"
+        for t in run.chat_history[-_CHAT_CFG.history_turns :]
     )
     user_msg = f"{transcript}user: {body.message}" if transcript else body.message
     tools = chat_tools.tools_for_status(run.status)
@@ -380,8 +394,8 @@ async def chat(run_id: str, body: ChatIn):
     start_idx = len(run.events)
 
     async def gen():
-        # force_tool_first=False + a lower max_iters: chat-only speed tuning,
-        # doesn't touch cheminformatics/critic's calls (loop.py defaults unchanged).
+        # Chat uses a lower max_iters for responsiveness; force_tool_first is
+        # configurable (default true) so operator Q&A stays tool-grounded.
         # Run the loop as a background task and poll run.events so tool_call
         # events reach the browser as they happen, not all at once after the
         # whole loop finishes — that dead-air wait was the actual "thinking
@@ -398,8 +412,8 @@ async def chat(run_id: str, body: ChatIn):
                 tools,
                 executor,
                 cfg=cfg,
-                max_iters=2,
-                force_tool_first=False,
+                max_iters=_CHAT_CFG.max_iters,
+                force_tool_first=_CHAT_CFG.force_tool_first,
             )
         )
         sent = start_idx
@@ -409,7 +423,7 @@ async def chat(run_id: str, body: ChatIn):
                     if event.get("agent") == "chat":
                         yield json.dumps(event)
                 sent = len(run.events)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(_CHAT_CFG.poll_interval_seconds)
         for event in run.events[sent:]:
             if event.get("agent") == "chat":
                 yield json.dumps(event)

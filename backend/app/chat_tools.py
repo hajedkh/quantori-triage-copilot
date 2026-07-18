@@ -17,8 +17,8 @@ Two groups, gated by run.status:
 
 Starting a run is intentionally NOT something the chat can do — that only
 happens via the classic form (target + file upload + "Run triage"). During
-setup the chat only has get_run_status; the system prompt (main.py) tells it
-to point the operator at the form if asked how to begin.
+setup the chat exposes run status plus read-only ranking/profile guidance so
+operators can choose a profile before launch.
 
 Every tool here calls chem.py's primitives (parse, descriptors, lipinski_pass,
 pains_flag, fingerprint, max_tanimoto, build_active_fps, _confidence) or reads
@@ -35,9 +35,11 @@ import asyncio
 import math
 
 from . import chem
+from .config import load_tool_config
 from .store import emit
 
-_MAX_EXAMPLES = 3
+_TOOL_CFG = load_tool_config()
+_MAX_EXAMPLES = _TOOL_CFG.max_examples
 
 
 # ---------------------------------------------------------------- schemas --
@@ -474,7 +476,10 @@ def focus_scaffold_schema() -> dict:
     }
 
 
-SETUP_TOOLS = [get_run_status_schema()]
+SETUP_TOOLS = [
+    get_run_status_schema(),
+    get_ranking_options_schema(),
+]
 
 READ_TOOLS = [
     get_run_status_schema(),
@@ -633,26 +638,58 @@ def _get_metric(run) -> dict:
 
 
 def _get_ranking_options(run) -> dict:
+    baseline = chem.DEFAULT_WEIGHTS
+    profiles = chem.RANKING_PROFILES
+
+    def _top_changes(weights: dict) -> list[dict]:
+        deltas = []
+        for key, base_val in baseline.items():
+            val = weights.get(key, base_val)
+            delta = round(val - base_val, 3)
+            if abs(delta) > 0:
+                deltas.append({"component": key, "delta_vs_balanced": delta})
+        deltas.sort(key=lambda d: abs(d["delta_vs_balanced"]), reverse=True)
+        return deltas[:4]
+
+    profile_details = {}
+    for name, cfg in profiles.items():
+        w = cfg["weights"]
+        profile_details[name] = {
+            "score_mode": cfg.get("score_mode", "enhanced"),
+            "confidence_policy": cfg.get("confidence_policy", name),
+            "weights": {
+                "similarity": round(w["similarity"], 3),
+                "breadth": round(w["breadth"], 3),
+                "qed": round(w["qed"], 3),
+                "sa": round(w["sa"], 3),
+                "penalty_lipinski": round(w["penalty_lipinski"], 3),
+                "penalty_pains": round(w["penalty_pains"], 3),
+            },
+            "largest_changes_vs_balanced": _top_changes(w),
+        }
+
     return {
         "selected_profile": getattr(run, "ranking_profile", "balanced"),
-        "profiles": {
+        "baseline_profile": "balanced",
+        "profile_summaries": {
             "balanced": {
                 "summary": "Balanced quality and developability.",
                 "best_for": "default triage and general-purpose runs",
             },
             "quality": {
-                "summary": "Heavier emphasis on similarity and multi-active coverage.",
+                "summary": "Higher weight on known-active similarity and breadth.",
                 "best_for": "lead-followup around known active chemotypes",
             },
             "explore": {
-                "summary": "More novelty-friendly with softer penalties.",
+                "summary": "More novelty-friendly with softer liability penalties.",
                 "best_for": "scaffold hopping and broader exploration",
             },
             "strict": {
-                "summary": "Stronger penalties for liabilities and stricter confidence gates.",
+                "summary": "Harsher liability penalties and tighter confidence gating.",
                 "best_for": "conservative shortlists for downstream synthesis",
             },
         },
+        "profile_details": profile_details,
     }
 
 

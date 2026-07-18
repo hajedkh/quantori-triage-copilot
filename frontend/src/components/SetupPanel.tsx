@@ -46,7 +46,12 @@ export default function SetupPanel({
 
       <div className="setup-grid">
         <div className="field">
-          <label htmlFor="target">Target protein</label>
+          <label
+            htmlFor="target"
+            title="Gene symbol or common target name used to fetch actives and literature context"
+          >
+            Target protein
+          </label>
           <input
             id="target"
             type="text"
@@ -54,14 +59,29 @@ export default function SetupPanel({
             value={target}
             onChange={(e) => onTarget(e.target.value)}
             spellCheck={false}
+            title="Gene symbol or common target name used to fetch actives and literature context"
           />
         </div>
 
         <div className="field">
-          <label htmlFor="file">
+          <label
+            htmlFor="file"
+            title={
+              mode === "mock"
+                ? "Demo mode uses a bundled candidate file"
+                : "Upload a CSV/SMI/TXT containing candidate SMILES"
+            }
+          >
             Candidate library {mode === "mock" ? "(bundled in demo)" : "(CSV of SMILES)"}
           </label>
-          <div className={"drop" + (file ? " has" : "")}>
+          <div
+            className={"drop" + (file ? " has" : "")}
+            title={
+              mode === "mock"
+                ? "Demo mode uses a bundled file; optional in this mode"
+                : "Upload CSV/SMI/TXT with SMILES entries"
+            }
+          >
             <FileText size={16} />
             <span className="file-meta">
               {file
@@ -75,7 +95,11 @@ export default function SetupPanel({
                 <X size={13} /> remove
               </button>
             ) : (
-              <button className="link" onClick={() => inputRef.current?.click()}>
+              <button
+                className="link"
+                onClick={() => inputRef.current?.click()}
+                title="Pick a local candidate library file"
+              >
                 browse
               </button>
             )}
@@ -91,11 +115,17 @@ export default function SetupPanel({
         </div>
 
         <div className="field">
-          <label htmlFor="ranking-profile">Ranking profile</label>
+          <label
+            htmlFor="ranking-profile"
+            title="Choose how scoring balances similarity, quality penalties, and novelty"
+          >
+            Ranking profile
+          </label>
           <select
             id="ranking-profile"
             value={rankingProfile}
             onChange={(e) => onRankingProfile(e.target.value as RankingProfile)}
+            title="Choose how scoring balances similarity, quality penalties, and novelty"
           >
             <option value="balanced">Balanced (default)</option>
             <option value="quality">Quality (similarity-focused)</option>
@@ -108,7 +138,11 @@ export default function SetupPanel({
           className="run-btn"
           onClick={onRun}
           disabled={disabled || !canRun}
-          title={disabled && disabledReason ? disabledReason : undefined}
+          title={
+            disabled && disabledReason
+              ? disabledReason
+              : "Start the full triage pipeline with current settings"
+          }
         >
           <Play size={16} strokeWidth={2.5} />
           Run triage
@@ -118,7 +152,12 @@ export default function SetupPanel({
       <div className="chips">
         <span className="k">Try:</span>
         {EXAMPLES.map((ex) => (
-          <button key={ex} className="chip" onClick={() => onTarget(ex)}>
+          <button
+            key={ex}
+            className="chip"
+            onClick={() => onTarget(ex)}
+            title={`Use ${ex} as the target protein`}
+          >
             {ex}
           </button>
         ))}

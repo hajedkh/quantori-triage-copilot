@@ -28,11 +28,19 @@ export default function OutputTabs({
   return (
     <div className="outputs">
       <div className="tabs">
-        <button className={tab === "dossier" ? "on" : ""} onClick={() => onTab("dossier")}>
+        <button
+          className={tab === "dossier" ? "on" : ""}
+          onClick={() => onTab("dossier")}
+          title="View target dossier, citations, and grounding notes"
+        >
           Dossier
           {citations.length > 0 && <span className="count">{citations.length}</span>}
         </button>
-        <button className={tab === "shortlist" ? "on" : ""} onClick={() => onTab("shortlist")}>
+        <button
+          className={tab === "shortlist" ? "on" : ""}
+          onClick={() => onTab("shortlist")}
+          title="View ranked compounds and confidence rationale"
+        >
           Shortlist
           {ranked.length > 0 && <span className="count">{ranked.length}</span>}
         </button>

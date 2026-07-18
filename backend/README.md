@@ -60,6 +60,42 @@ The backend supports two OpenAI-compatible providers via `app/llm.py`:
 Frontend and backend can switch active provider/model at runtime through
 `/config/llm` endpoints.
 
+Export/cross-reference tuning is centralized in `app/config.py` and can be
+overridden via environment variables (see repo-root `.env.example`):
+
+1. `EXPORT_XREF_TIMEOUT`
+2. `EXPORT_XREF_BUDGET_SECONDS`
+3. `EXPORT_XREF_TOP_LIMIT`
+4. `EXPORT_XREF_PROBE_N`
+5. `EXPORT_XREF_WORKERS`
+6. `EXPORT_EMBED_PARALLEL_MIN`
+
+Additional runtime tunables are also centralized in `app/config.py`:
+
+1. Source acquisition (`SOURCES_TIMEOUT`, `SOURCES_KNOWN_ACTIVES_LIMIT`, `SOURCES_PUBMED_RETMAX`)
+2. Screening parallelism (`CHEM_PARALLEL_THRESHOLD`, `CHEM_BATCH_SIZE`, `CHEM_MAX_WORKERS_CAP`)
+3. Tool payload limits (`TOOLS_MAX_EXAMPLES`, `TOOLS_MAX_BATCH`)
+4. Chat runtime (`CHAT_MAX_ITERS`, `CHAT_POLL_INTERVAL_SECONDS`, `CHAT_HISTORY_TURNS`)
+5. Diversify defaults/bounds (`DIVERSIFY_DEFAULT_LAM`, `DIVERSIFY_DEFAULT_CUTOFF`, `DIVERSIFY_DEFAULT_MAX_GENERATED`, `DIVERSIFY_MIN_MAX_GENERATED`, `DIVERSIFY_MAX_MAX_GENERATED`)
+
+Export/cross-reference tuning is centralized in `app/config.py` and can be
+overridden via environment variables (see repo-root `.env.example`):
+
+1. `EXPORT_XREF_TIMEOUT`
+2. `EXPORT_XREF_BUDGET_SECONDS`
+3. `EXPORT_XREF_TOP_LIMIT`
+4. `EXPORT_XREF_PROBE_N`
+5. `EXPORT_XREF_WORKERS`
+6. `EXPORT_EMBED_PARALLEL_MIN`
+
+Additional runtime tunables are also centralized in `app/config.py`:
+
+1. Source acquisition (`SOURCES_TIMEOUT`, `SOURCES_KNOWN_ACTIVES_LIMIT`, `SOURCES_PUBMED_RETMAX`)
+2. Screening parallelism (`CHEM_PARALLEL_THRESHOLD`, `CHEM_BATCH_SIZE`, `CHEM_MAX_WORKERS_CAP`)
+3. Tool payload limits (`TOOLS_MAX_EXAMPLES`, `TOOLS_MAX_BATCH`)
+4. Chat runtime (`CHAT_MAX_ITERS`, `CHAT_POLL_INTERVAL_SECONDS`, `CHAT_HISTORY_TURNS`)
+5. Diversify defaults/bounds (`DIVERSIFY_DEFAULT_LAM`, `DIVERSIFY_DEFAULT_CUTOFF`, `DIVERSIFY_DEFAULT_MAX_GENERATED`, `DIVERSIFY_MIN_MAX_GENERATED`, `DIVERSIFY_MAX_MAX_GENERATED`)
+
 ## High-Level Architecture
 
 Main modules:
