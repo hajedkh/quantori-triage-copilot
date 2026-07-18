@@ -428,6 +428,12 @@ button {
   border-top: 1px solid var(--line-soft);
 }
 
+.chat-chips .chip {
+  text-align: left;
+  white-space: normal;
+  line-height: 1.25;
+}
+
 .chat-input-row {
   display: flex;
   gap: 8px;

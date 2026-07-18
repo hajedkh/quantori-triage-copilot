@@ -18,6 +18,7 @@ export interface StreamEvent {
   | "diversity"
   | "tool_call"
   | "steer"
+  | "export_progress"
   | "awaiting_approval";
   agent?: LogEvent["agent"];
   payload?: any;

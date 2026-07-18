@@ -89,6 +89,11 @@ export interface ToolCallEvent {
   status: "ok" | "error" | "retry";
 }
 
+export interface ExportProgress {
+  stage: string;
+  message: string;
+}
+
 // The whole client-side run, assembled from streamed events.
 export interface RunState {
   status: RunStatus;
@@ -109,6 +114,7 @@ export interface RunState {
   // TRACE_CAP entries per agent for the live rail display; this is the full
   // history, kept around solely for the "Download traces" export.
   fullTrace: Record<AgentId, ToolCallEvent[]>;
+  exportProgress: ExportProgress | null;
 }
 
 // LLM provider layer (both providers are OpenAI-compatible; see backend/app/llm.py).

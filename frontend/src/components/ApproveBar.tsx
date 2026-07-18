@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ShieldCheck, Download, Check, ListTree } from "lucide-react";
-import type { DiversityMode, DiversifyRequest, RankingProfile } from "../types";
+import type { DiversityMode, DiversifyRequest, ExportProgress, RankingProfile } from "../types";
 import BrandSpinner from "./BrandSpinner";
 
 const APPROVE_STAGES = [
@@ -11,6 +11,18 @@ const APPROVE_STAGES = [
   "Finalizing downloads",
 ];
 
+const STAGE_TO_INDEX: Record<string, number> = {
+  start: 0,
+  csv_prepare: 0,
+  crossref_scope: 1,
+  crossref_lookup: 1,
+  csv_done: 1,
+  sdf_prepare: 2,
+  report_prepare: 3,
+  finalize: 4,
+  done: 4,
+};
+
 interface Props {
   exported: boolean;
   onApprove: (rankingProfile: RankingProfile) => Promise<void> | void;
@@ -18,6 +30,7 @@ interface Props {
   onRankingProfileChange: (rankingProfile: RankingProfile) => Promise<void> | void;
   canDiversify: boolean;
   onDownload: (kind: "csv" | "sdf" | "report" | "traces") => void;
+  exportProgress: ExportProgress | null;
 }
 
 export default function ApproveBar({
@@ -27,6 +40,7 @@ export default function ApproveBar({
   onRankingProfileChange,
   canDiversify,
   onDownload,
+  exportProgress,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<DiversityMode>("scaffold");
@@ -36,7 +50,6 @@ export default function ApproveBar({
   const [rankingProfile, setRankingProfile] = useState<RankingProfile>("balanced");
   const [busy, setBusy] = useState(false);
   const [approving, setApproving] = useState(false);
-  const [approveStage, setApproveStage] = useState(0);
 
   const submitDiversify = async () => {
     setBusy(true);
@@ -75,17 +88,15 @@ export default function ApproveBar({
   const submitApprove = async () => {
     if (approving) return;
     setApproving(true);
-    setApproveStage(0);
-    const timer = window.setInterval(() => {
-      setApproveStage((s) => (s < APPROVE_STAGES.length - 1 ? s + 1 : s));
-    }, 1400);
     try {
       await onApprove(rankingProfile);
     } finally {
-      window.clearInterval(timer);
       setApproving(false);
     }
   };
+
+  const currentStageMessage = exportProgress?.message || APPROVE_STAGES[0];
+  const stageIndex = STAGE_TO_INDEX[exportProgress?.stage || "start"] ?? 0;
 
   return (
     <>
@@ -105,7 +116,7 @@ export default function ApproveBar({
           </strong>
           <p>
             {approving
-              ? APPROVE_STAGES[approveStage]
+              ? currentStageMessage
               : exported
                 ? "Exported with full provenance. Download below."
                 : "Review the ranked shortlist, then either approve to export or run one more diversification pass before re-filtering and re-ranking."}
@@ -113,8 +124,8 @@ export default function ApproveBar({
           {approving && (
             <div className="approve-task-list" aria-live="polite">
               {APPROVE_STAGES.map((task, idx) => (
-                <div key={task} className={"approve-task " + (idx < approveStage ? "done" : idx === approveStage ? "active" : "pending")}>
-                  {idx < approveStage ? "✓" : idx === approveStage ? "•" : "○"} {task}
+                <div key={task} className={"approve-task " + (idx < stageIndex ? "done" : idx === stageIndex ? "active" : "pending")}>
+                  {idx < stageIndex ? "✓" : idx === stageIndex ? "•" : "○"} {task}
                 </div>
               ))}
             </div>

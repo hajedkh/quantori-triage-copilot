@@ -40,6 +40,7 @@ const EMPTY: RunState = {
   targetId: "",
   toolTrace: { supervisor: [], knowledge: [], cheminformatics: [], critic: [], diversifier: [] },
   fullTrace: { supervisor: [], knowledge: [], cheminformatics: [], critic: [], diversifier: [] },
+  exportProgress: null,
 };
 
 const TRACE_CAP = 8;
@@ -148,6 +149,9 @@ export default function App() {
           next.fullTrace = { ...s.fullTrace, [agentId]: [...prevFull, e.payload] };
           break;
         }
+        case "export_progress":
+          next.exportProgress = e.payload;
+          break;
       }
       return next;
     });
@@ -209,6 +213,9 @@ export default function App() {
   const approve = useCallback(async (rankingProfile: RankingProfile) => {
     if (mode === "live" && runIdRef.current) {
       try {
+        if (unsubRef.current) unsubRef.current();
+        unsubRef.current = subscribe(runIdRef.current, apply);
+        setRun((s) => ({ ...s, exportProgress: { stage: "start", message: "Starting export." } }));
         await approveRun(runIdRef.current, rankingProfile);
       } catch (err) {
         setRun((s) => ({
@@ -408,6 +415,7 @@ export default function App() {
                 onRankingProfileChange={rerankAtGate}
                 canDiversify={mode === "live"}
                 onDownload={download}
+                exportProgress={run.exportProgress}
               />
             )}
           </>
