@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { BookOpen, FlaskConical, ListChecks, Compass } from "lucide-react";
 import type { AgentId, AgentStatus, FunnelState, LogEvent, Metric, ToolCallEvent } from "../types";
 import FunnelMeter from "./FunnelMeter";
+import BrandSpinner from "./BrandSpinner";
 
 interface Props {
   agents: Record<AgentId, AgentStatus>;
@@ -32,7 +33,9 @@ export default function PipelineRail({ agents, funnel, metric, log, toolTrace }:
             return (
               <div key={a.id} className={"agent " + st}>
                 <div className="agent-top">
-                  <div className="agent-ico">{a.icon}</div>
+                  <div className="agent-ico">
+                    {st === "running" ? <BrandSpinner size={17} label={`${a.name} working`} /> : a.icon}
+                  </div>
                   <div className="agent-body">
                     <div className="agent-name">{a.name}</div>
                     <div className="agent-role">{a.role}</div>

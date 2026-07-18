@@ -10,6 +10,8 @@ functions with no scripted delays.
 """
 
 from __future__ import annotations
+import json
+import re
 from . import chem, sources, llm, tools, loop
 from .store import emit
 
@@ -21,56 +23,25 @@ async def supervisor(run):
     target_id, pref = sources.resolve_target(run.target_name)
     run.target_id = target_id
     emit(run, {"type": "target_resolved", "payload": {"id": target_id}})
-    emit(
-        run,
-        {
-            "type": "log",
-            "agent": "supervisor",
-            "payload": f"Resolved {run.target_name} → {target_id} · {len(run.candidates)} molecules loaded",
-        },
-    )
-    emit(
-        run,
-        {
-            "type": "funnel",
-            "payload": {"input": len(run.candidates), "filtered": None, "ranked": None},
-        },
-    )
+    emit(run, {"type": "log", "agent": "supervisor",
+               "payload": f"Resolved {run.target_name} → {target_id} · {len(run.candidates)} molecules loaded"})
+    emit(run, {"type": "funnel", "payload": {"input": len(run.candidates), "filtered": None, "ranked": None}})
     emit(run, {"type": "agent_done", "agent": "supervisor"})
 
 
 # ---------------- Knowledge ----------------
 async def knowledge(run):
     emit(run, {"type": "agent_start", "agent": "knowledge"})
-    emit(
-        run,
-        {
-            "type": "log",
-            "agent": "knowledge",
-            "payload": "Querying ChEMBL for known actives (pChEMBL ≥ 6)…",
-        },
-    )
+    emit(run, {"type": "log", "agent": "knowledge", "payload": "Querying ChEMBL for known actives (pChEMBL ≥ 6)…"})
     actives, active_ids = sources.get_known_actives(run.target_id)
     run.known_actives = actives
     run.active_ids = active_ids
-    emit(
-        run,
-        {
-            "type": "log",
-            "agent": "knowledge",
-            "payload": f"Retrieved {len(actives)} known actives · fetching PubMed abstracts…",
-        },
-    )
+    emit(run, {"type": "log", "agent": "knowledge",
+               "payload": f"Retrieved {len(actives)} known actives · fetching PubMed abstracts…"})
     abstracts = sources.pubmed_abstracts(run.target_name)
-    emit(
-        run,
-        {
-            "type": "log",
-            "agent": "knowledge",
-            "payload": f"Retrieved {len(abstracts)} abstracts · writing cited dossier…",
-        },
-    )
-    dossier, citations, grounding = await llm.build_dossier(run.target_name, abstracts)
+    emit(run, {"type": "log", "agent": "knowledge",
+               "payload": f"Retrieved {len(abstracts)} abstracts · writing cited dossier…"})
+    dossier, citations = await llm.build_dossier(run.target_name, abstracts)
     run.dossier = dossier
     run.citations = citations
     run.grounding = grounding
@@ -131,14 +102,8 @@ def _is_small_model(cfg) -> bool:
 # ---------------- Cheminformatics (real tool-calling agent) ----------------
 async def cheminformatics(run):
     emit(run, {"type": "agent_start", "agent": "cheminformatics"})
-    emit(
-        run,
-        {
-            "type": "log",
-            "agent": "cheminformatics",
-            "payload": "Agentic filtering — deciding thresholds and strategy…",
-        },
-    )
+    emit(run, {"type": "log", "agent": "cheminformatics",
+               "payload": "Agentic filtering — deciding thresholds and strategy…"})
 
     cfg = llm.get_active_config()
     small = _is_small_model(cfg)
@@ -189,13 +154,7 @@ async def cheminformatics(run):
         return await tools.execute_tool(run, name, args)
 
     summary = await loop.run_tool_loop(
-        run,
-        "cheminformatics",
-        system_prompt,
-        user_msg,
-        tools.CHEM_TOOLS,
-        executor,
-        cfg=cfg,
+        run, "cheminformatics", system_prompt, user_msg, tools.CHEM_TOOLS, executor, cfg=cfg
     )
 
     # ---- Deterministic fallback ----
@@ -233,16 +192,31 @@ async def cheminformatics(run):
 
 
 # ---------------- Critic / Ranking (real tool-calling agent) ----------------
+def _parse_critic_json(text: str):
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
+        t = re.sub(r"```\s*$", "", t)
+        t = t.strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", t, re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return None
+    return None
+
+
 async def critic(run):
     emit(run, {"type": "agent_start", "agent": "critic"})
-    emit(
-        run,
-        {
-            "type": "log",
-            "agent": "critic",
-            "payload": "Agentic scoring — gathering evidence before ranking…",
-        },
-    )
+    emit(run, {"type": "log", "agent": "critic",
+               "payload": "Agentic scoring — gathering evidence before ranking…"})
 
     cfg = llm.get_active_config()
     small = _is_small_model(cfg)
@@ -290,76 +264,54 @@ async def critic(run):
     raw = await loop.run_tool_loop(
         run, "critic", system_prompt, user_msg, tools.CRITIC_TOOLS, executor, cfg=cfg
     )
+    parsed = _parse_critic_json(raw)
 
-    # The submit_ranking tool (called within the loop) attaches evidence_used
-    # to run.ranked using canonical SMILES matching, so we don't need to parse
-    # the model's free-text output. If the model never called submit_ranking
-    # (e.g. it ran out of iterations), we still have run.ranked from
-    # rank_survivors and just log the gap.
+    if parsed is None:
+        emit(run, {"type": "log", "agent": "critic",
+                   "payload": "Output wasn't valid JSON — retrying with a stricter instruction…"})
+        raw2 = await loop.run_tool_loop(
+            run, "critic",
+            system_prompt + "\n\nReturn ONLY valid JSON. No markdown fences. No commentary before or after.",
+            "Your previous reply was not valid JSON. Return ONLY the JSON object now.",
+            tools.CRITIC_TOOLS, executor, cfg=cfg, max_iters=2,
+        )
+        parsed = _parse_critic_json(raw2)
+
+    # run.ranked (from the rank_survivors tool call) is the real, RDKit-scored
+    # list — the model's JSON only adds evidence notes to it, never its own numbers.
     if run.ranked:
         ranked = run.ranked
-        if not any(r.get("evidence_used") for r in ranked):
-            emit(
-                run,
-                {
-                    "type": "log",
-                    "agent": "critic",
-                    "payload": "Model did not call submit_ranking — evidence notes not attached.",
-                },
-            )
-        if getattr(run, "critic_replan_reason", None):
-            emit(
-                run,
-                {
-                    "type": "log",
-                    "agent": "critic",
-                    "payload": f"Model flagged yield concern: {run.critic_replan_reason}",
-                },
-            )
+        if parsed and isinstance(parsed.get("ranked"), list):
+            evidence_by_smiles = {
+                r.get("smiles"): r.get("evidence_used")
+                for r in parsed["ranked"]
+                if isinstance(r, dict) and r.get("smiles")
+            }
+            for r in ranked:
+                ev = evidence_by_smiles.get(r["smiles"])
+                if ev:
+                    r["evidence_used"] = ev
+        if parsed and parsed.get("replan_reason"):
+            emit(run, {"type": "log", "agent": "critic",
+                       "payload": f"Model flagged yield concern: {parsed['replan_reason']}"})
     else:
-        emit(
-            run,
-            {
-                "type": "log",
-                "agent": "critic",
-                "payload": "Agent never produced a ranking — falling back to deterministic chem.rank().",
-            },
-        )
+        emit(run, {"type": "log", "agent": "critic",
+                   "payload": "Agent never produced a ranking — falling back to deterministic chem.rank()."})
         ranked = chem.rank(run.survivors, run.active_ids)
         run.ranked = ranked
 
     n_in = len(run.candidates)
-    emit(
-        run,
-        {
-            "type": "funnel",
-            "payload": {
-                "input": n_in,
-                "filtered": len(run.survivors),
-                "ranked": len(ranked),
-            },
-        },
-    )
+    emit(run, {"type": "funnel", "payload": {"input": n_in, "filtered": len(run.survivors), "ranked": len(ranked)}})
     emit(run, {"type": "ranked", "payload": ranked})
     dropped = len(run.survivors) - len(ranked)
-    emit(
-        run,
-        {
-            "type": "log",
-            "agent": "critic",
-            "payload": f"Dropped {dropped} low-confidence · top {len(ranked)} ranked",
-        },
-    )
+    emit(run, {"type": "log", "agent": "critic",
+               "payload": f"Dropped {dropped} low-confidence · top {len(ranked)} ranked"})
 
     total_actives = sum(1 for c in run.candidates if c.get("label"))
     recovered = sum(1 for r in ranked if r["is_known_active"])
     if total_actives > 0:
-        metric = {
-            "recovered": recovered,
-            "total_actives": total_actives,
-            "top_n": len(ranked),
-            "screened": n_in,
-        }
+        metric = {"recovered": recovered, "total_actives": total_actives,
+                  "top_n": len(ranked), "screened": n_in}
         run.metric = metric
         emit(run, {"type": "metric", "payload": metric})
 

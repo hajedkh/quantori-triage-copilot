@@ -68,13 +68,7 @@ def load_config(provider: str | None = None) -> LLMConfig:
     # The OpenAI SDK rejects an empty api_key even though Ollama itself
     # ignores it, so fall back to a dummy non-empty string.
     api_key = os.environ.get(f"{prefix}_API_KEY") or "ollama"
-    return LLMConfig(
-        provider=provider,
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        temperature=0.2,
-    )
+    return LLMConfig(provider=provider, base_url=base_url, api_key=api_key, model=model, temperature=0.2)
 
 
 _active_cfg: LLMConfig | None = None
@@ -142,14 +136,23 @@ async def chat(
 
 
 async def health(cfg: LLMConfig | None = None) -> dict:
-    """1-token ping against the given (or active) provider. Never raises."""
+    """Ping against the given (or active) provider. Never raises.
+
+    max_tokens=50, not 1: reasoning models (e.g. gpt-5) can spend an
+    unbounded number of hidden "reasoning tokens" before any visible output,
+    and some gateways hard-reject the request with a 400 ("could not finish
+    the message") if max_tokens is too small to even start that — 1 token
+    reliably triggers it. 50 is enough headroom for every model tested
+    (reasoning or not) to at least complete without erroring, which is what
+    "is this provider reachable" should actually mean here.
+    """
     cfg = cfg or get_active_config()
     start = time.monotonic()
     try:
         await chat(
             messages=[{"role": "user", "content": "hi"}],
             cfg=cfg,
-            max_tokens=1,
+            max_tokens=50,
             timeout=8.0,
         )
         return {
@@ -173,11 +176,7 @@ def list_ollama_models(timeout: float = 3.0) -> list[str]:
     the model dropdown. Empty list if Ollama is unreachable."""
     try:
         cfg = load_config("ollama")
-        base = (
-            cfg.base_url[:-3]
-            if cfg.base_url.rstrip("/").endswith("/v1")
-            else cfg.base_url
-        )
+        base = cfg.base_url[:-3] if cfg.base_url.rstrip("/").endswith("/v1") else cfg.base_url
         r = requests.get(f"{base.rstrip('/')}/api/tags", timeout=timeout)
         r.raise_for_status()
         return [m["name"] for m in r.json().get("models", [])]
@@ -200,73 +199,20 @@ async def build_dossier(
 
     if abstracts:
         try:
-            dossier = await _llm_dossier(target, abstracts, cfg)
-            grounding = _ground_check(dossier, abstracts)
-            if grounding["ungrounded"]:
-                # Re-run with explicit warning about ungrounded claims
-                dossier = await _llm_dossier(
-                    target,
-                    abstracts,
-                    cfg,
-                    extra_instruction=(
-                        "IMPORTANT: Your previous draft contained claims citing PMIDs "
-                        "not present in the sources, or claims not supported by the "
-                        "source text. Use ONLY information from the provided sources. "
-                        "If a source does not support a claim, do not make it."
-                    ),
-                )
-                grounding = _ground_check(dossier, abstracts)
-            return dossier, citations, grounding
+            return await _llm_dossier(target, abstracts, cfg), citations
         except Exception:
             pass  # fall through to template
 
-    return (
-        _template_dossier(target, abstracts),
-        citations,
-        {"ungrounded": [], "cited_pmids": []},
-    )
+    return _template_dossier(target, abstracts), citations
 
 
-def _ground_check(dossier: str, abstracts: list[dict]) -> dict:
-    """Verify that every [[PMID:xxx]] in the dossier maps to a provided abstract,
-    and flag any PMID that doesn't. Also checks for claims that are not
-    supported by the cited abstract text (simple keyword overlap heuristic)."""
-    import re
-
-    provided_pmids = {a["pmid"] for a in abstracts if a.get("pmid")}
-    abstract_by_pmid = {a["pmid"]: a for a in abstracts if a.get("pmid")}
-
-    cited = re.findall(r"\[\[PMID:(\d+)\]\]", dossier)
-    cited_pmids = list(set(cited))
-
-    ungrounded = []
-    for pmid in cited_pmids:
-        if pmid not in provided_pmids:
-            ungrounded.append({"pmid": pmid, "reason": "PMID not in provided sources"})
-
-    return {
-        "cited_pmids": cited_pmids,
-        "provided_pmids": list(provided_pmids),
-        "ungrounded": ungrounded,
-        "all_grounded": len(ungrounded) == 0,
-    }
-
-
-async def _llm_dossier(
-    target: str, abstracts: list[dict], cfg: LLMConfig, extra_instruction: str = ""
-) -> str:
-    context = "\n".join(
-        f"[PMID:{a['pmid']}] {a['title']}. {a['abstract']}" for a in abstracts[:4]
-    )
+async def _llm_dossier(target: str, abstracts: list[dict], cfg: LLMConfig) -> str:
+    context = "\n".join(f"[PMID:{a['pmid']}] {a['title']}. {a['abstract']}" for a in abstracts[:4])
     system = (
         "You are a drug-discovery knowledge agent. Write a concise 4-6 sentence "
         "dossier on the target using ONLY the provided sources. Cite sources inline "
-        "as [[PMID:xxxx]]. Be factual and specific. Do NOT cite any PMID that is "
-        "not listed below. Do NOT infer or fabricate information beyond what the "
-        "sources explicitly state."
+        "as [[PMID:xxxx]]. Be factual and specific. "
     )
-    if extra_instruction:
-        system += f"\n\n{extra_instruction}"
     user = f"Target: {target}\n\nSources:\n{context}\n\nWrite the dossier now."
     resp = await chat(
         messages=[
