@@ -3,6 +3,14 @@ import { ShieldCheck, Download, Check, ListTree } from "lucide-react";
 import type { DiversityMode, DiversifyRequest, RankingProfile } from "../types";
 import BrandSpinner from "./BrandSpinner";
 
+const APPROVE_STAGES = [
+  "Preparing CSV summary for selected compounds",
+  "Checking ChEMBL and PubChem for selected structures",
+  "Preparing 3D structures for .sdf",
+  "Assembling report with rationale and citations",
+  "Finalizing downloads",
+];
+
 interface Props {
   exported: boolean;
   onApprove: (rankingProfile: RankingProfile) => Promise<void> | void;
@@ -28,6 +36,7 @@ export default function ApproveBar({
   const [rankingProfile, setRankingProfile] = useState<RankingProfile>("balanced");
   const [busy, setBusy] = useState(false);
   const [approving, setApproving] = useState(false);
+  const [approveStage, setApproveStage] = useState(0);
 
   const submitDiversify = async () => {
     setBusy(true);
@@ -66,9 +75,14 @@ export default function ApproveBar({
   const submitApprove = async () => {
     if (approving) return;
     setApproving(true);
+    setApproveStage(0);
+    const timer = window.setInterval(() => {
+      setApproveStage((s) => (s < APPROVE_STAGES.length - 1 ? s + 1 : s));
+    }, 1400);
     try {
       await onApprove(rankingProfile);
     } finally {
+      window.clearInterval(timer);
       setApproving(false);
     }
   };
@@ -91,11 +105,20 @@ export default function ApproveBar({
           </strong>
           <p>
             {approving
-              ? "Preparing CSV, SDF, report, and audit trail files. This may take a moment."
+              ? APPROVE_STAGES[approveStage]
               : exported
                 ? "Exported with full provenance. Download below."
                 : "Review the ranked shortlist, then either approve to export or run one more diversification pass before re-filtering and re-ranking."}
           </p>
+          {approving && (
+            <div className="approve-task-list" aria-live="polite">
+              {APPROVE_STAGES.map((task, idx) => (
+                <div key={task} className={"approve-task " + (idx < approveStage ? "done" : idx === approveStage ? "active" : "pending")}>
+                  {idx < approveStage ? "✓" : idx === approveStage ? "•" : "○"} {task}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="approve-actions">

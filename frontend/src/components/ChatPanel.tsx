@@ -22,11 +22,13 @@ const GREETING =
   "are you screening?";
 
 function chipsFor(status: RunStatus): string[] {
-  if (status === "idle") return ["How do I start a run?", "What does the diversity setting do?"];
+  if (status === "idle") return ["How do I start a run?", "What public databases are used in the report?", "What does the diversity setting do?"];
   if (status === "running")
-    return ["What has the workflow done so far?", "How many compounds survived the filter?", "What thresholds were used?", "How many compounds did the PAINS filter remove?"];
+    return ["What has the workflow done so far?", "What public databases are used in the report?", "How many compounds survived the filter?", "What thresholds were used?", "How many compounds did the PAINS filter remove?"];
   if (status === "awaiting_approval")
     return [
+      "What public databases are used to prepare the report?",
+      "Summarize the methods used in this run.",
       "Why did compound #1 rank first?",
       "Should we diversify and rerun?",
       "Which scaffolds are most prevalent in the top 20 compounds?",

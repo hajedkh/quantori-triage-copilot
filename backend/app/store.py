@@ -40,6 +40,12 @@ class Run:
         0  # how many seed molecules were used to generate new compounds
     )
     provenance: dict | None = None  # {timestamp, model, provider} captured at run start
+    export_progress: dict | None = None  # export stage/status metadata for chat/UI
+    xref_summary: dict | None = None  # cross-reference summary from export step
+    xref_by_smiles: dict = field(
+        default_factory=dict
+    )  # smiles -> {chembl_id, pubchem_cid, crossref_queried}
+    export_artifacts: dict | None = None  # artifact paths/flags once exported
     screen_stats: dict | None = (
         None  # stats dict from the last screen_candidates tool call
     )

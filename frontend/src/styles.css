@@ -1730,6 +1730,26 @@ button {
   font-size: 12.5px;
 }
 
+.approve-task-list {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.approve-task {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.approve-task.active {
+  color: var(--fg);
+}
+
+.approve-task.done {
+  color: var(--teal);
+}
+
 .approve-txt {
   flex: 1 1 440px;
   min-width: 240px;

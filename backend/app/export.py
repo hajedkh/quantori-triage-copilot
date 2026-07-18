@@ -10,8 +10,12 @@ all computed fresh from the ranked SMILES at export time.
 from __future__ import annotations
 import csv
 import os
-from concurrent.futures import ProcessPoolExecutor
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import quote
+
+import requests
 from rdkit import Chem
 
 # Import chem for extended_descriptors — resolve relative or absolute
@@ -64,12 +68,34 @@ _CSV_COLUMNS = [
     "scaffold",
     "molecular_formula",
     "inchikey",
+    # --- External cross-reference ---
+    "chembl_id",
+    "pubchem_cid",
+    "crossref_queried",
     # --- Provenance ---
     "is_known_active",
     "is_diversified_generated",
     "reason",
     "evidence_used",
 ]
+
+_CHEMBL = "https://www.ebi.ac.uk/chembl/api/data"
+_PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+
+_XREF_TIMEOUT = 4
+_XREF_BUDGET_SECONDS = 18.0
+_XREF_TOP_LIMIT = 250
+_XREF_PROBE_N = 8
+_XREF_WORKERS = 16
+
+
+def _notify_progress(callback, stage: str, message: str) -> None:
+    if callback is None:
+        return
+    try:
+        callback(stage, message)
+    except Exception:
+        pass
 
 
 def _enrich_row(r: dict) -> dict:
@@ -95,9 +121,7 @@ def _enrich_row(r: dict) -> dict:
         "rank": r.get("rank", ""),
         "smiles": r["smiles"],
         "score": (
-            f"{float(r.get('score')):.3f}"
-            if r.get("score") not in (None, "")
-            else ""
+            f"{float(r.get('score')):.3f}" if r.get("score") not in (None, "") else ""
         ),
         "confidence": r.get("confidence", ""),
         # similarity
@@ -133,6 +157,10 @@ def _enrich_row(r: dict) -> dict:
         "scaffold": ext["scaffold"],
         "molecular_formula": ext["molecular_formula"],
         "inchikey": ext["inchikey"],
+        # external cross-reference (filled later)
+        "chembl_id": "",
+        "pubchem_cid": "",
+        "crossref_queried": "",
         # provenance
         "is_known_active": r.get("is_known_active", ""),
         "is_diversified_generated": r.get("is_diversified_generated", False),
@@ -143,13 +171,180 @@ def _enrich_row(r: dict) -> dict:
     }
 
 
-def write_csv(path: Path, ranked: list[dict]) -> None:
-    """Write the comprehensive triage CSV with full cheminformatics data."""
+def _lookup_chembl_id(inchikey: str) -> str:
+    if not inchikey:
+        return ""
+    try:
+        r = requests.get(
+            f"{_CHEMBL}/molecule.json",
+            params={"molecule_structures__standard_inchi_key": inchikey, "limit": 1},
+            timeout=_XREF_TIMEOUT,
+        )
+        r.raise_for_status()
+        molecules = r.json().get("molecules", [])
+        if molecules:
+            return molecules[0].get("molecule_chembl_id", "") or ""
+    except Exception:
+        return ""
+    return ""
+
+
+def _lookup_pubchem_cid(inchikey: str) -> str:
+    if not inchikey:
+        return ""
+    try:
+        r = requests.get(
+            f"{_PUBCHEM}/compound/inchikey/{quote(inchikey)}/cids/JSON",
+            timeout=_XREF_TIMEOUT,
+        )
+        r.raise_for_status()
+        cids = r.json().get("IdentifierList", {}).get("CID", [])
+        if cids:
+            return str(cids[0])
+    except Exception:
+        return ""
+    return ""
+
+
+def _xref_one(row: dict) -> tuple[str, dict]:
+    inchikey = row.get("inchikey", "") or ""
+    smiles = row.get("smiles", "") or ""
+    chembl_id = _lookup_chembl_id(inchikey)
+    pubchem_cid = _lookup_pubchem_cid(inchikey)
+    return (
+        smiles,
+        {
+            "chembl_id": chembl_id,
+            "pubchem_cid": pubchem_cid,
+            "crossref_queried": True,
+        },
+    )
+
+
+def _decide_xref_scope(rows: list[dict]) -> tuple[int, dict]:
+    n = len(rows)
+    if n <= _XREF_TOP_LIMIT:
+        return n, {
+            "mode": "all",
+            "reason": "<= top-50 shortlist size",
+            "projected_seconds": 0.0,
+        }
+
+    sample_n = min(_XREF_PROBE_N, n)
+    sample_rows = rows[:sample_n]
+    start = time.perf_counter()
+    workers = max(1, min(_XREF_WORKERS, sample_n))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_xref_one, r) for r in sample_rows]
+        for f in as_completed(futures):
+            try:
+                f.result()
+            except Exception:
+                pass
+    elapsed = max(time.perf_counter() - start, 0.01)
+    avg_per_compound = elapsed / sample_n
+    projected = avg_per_compound * n
+
+    if projected > _XREF_BUDGET_SECONDS:
+        return _XREF_TOP_LIMIT, {
+            "mode": "top50",
+            "reason": "projected API time too long",
+            "projected_seconds": round(projected, 2),
+        }
+    return n, {
+        "mode": "all",
+        "reason": "projected API time acceptable",
+        "projected_seconds": round(projected, 2),
+    }
+
+
+def _crossref_rows(rows: list[dict], progress_callback=None) -> tuple[list[dict], dict]:
+    if not rows:
+        return rows, {
+            "requested": 0,
+            "queried": 0,
+            "mode": "all",
+            "reason": "empty shortlist",
+            "projected_seconds": 0.0,
+            "chembl_found": 0,
+            "pubchem_found": 0,
+        }
+
+    _notify_progress(
+        progress_callback,
+        "crossref_scope",
+        "Estimating cross-reference scope and API latency.",
+    )
+    scope_n, meta = _decide_xref_scope(rows)
+    scoped = rows[:scope_n]
+
+    _notify_progress(
+        progress_callback,
+        "crossref_lookup",
+        "Checking ChEMBL and PubChem for selected structures.",
+    )
+    by_smiles: dict[str, dict] = {}
+    workers = max(1, min(_XREF_WORKERS, len(scoped)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_xref_one, r) for r in scoped]
+        for f in as_completed(futures):
+            try:
+                smi, data = f.result()
+                by_smiles[smi] = data
+            except Exception:
+                pass
+
+    out = []
+    for i, row in enumerate(rows):
+        smi = row.get("smiles", "")
+        ref = by_smiles.get(smi)
+        if ref:
+            out.append({**row, **ref})
+        else:
+            out.append(
+                {
+                    **row,
+                    "chembl_id": "",
+                    "pubchem_cid": "",
+                    "crossref_queried": i < scope_n,
+                }
+            )
+
+    summary = {
+        "requested": len(rows),
+        "queried": scope_n,
+        **meta,
+        "chembl_found": sum(1 for r in out if r.get("chembl_id")),
+        "pubchem_found": sum(1 for r in out if r.get("pubchem_cid")),
+    }
+    return out, summary
+
+
+def write_csv(
+    path: Path, ranked: list[dict], progress_callback=None
+) -> tuple[list[dict], dict]:
+    """Write CSV and return enriched rows + cross-reference summary."""
+    _notify_progress(
+        progress_callback,
+        "csv_prepare",
+        "Preparing CSV summary for selected compounds.",
+    )
+    enriched_rows = [_enrich_row(r) for r in ranked]
+    enriched_rows, xref_summary = _crossref_rows(enriched_rows, progress_callback)
+
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=_CSV_COLUMNS, extrasaction="ignore")
         w.writeheader()
-        for r in ranked:
-            w.writerow(_enrich_row(r))
+        for row in enriched_rows:
+            w.writerow(row)
+
+    _notify_progress(
+        progress_callback,
+        "csv_done",
+        "CSV export complete.",
+    )
+
+    return enriched_rows, xref_summary
 
 
 def _embed_3d(mol):
@@ -343,6 +538,8 @@ def write_report(
     screen_stats: dict | None = None,
     grounding: dict | None = None,
     provenance: dict | None = None,
+    enriched_rows: list[dict] | None = None,
+    xref_summary: dict | None = None,
 ) -> None:
     lines = [f"# Target Triage Report — {target}", ""]
     if provenance:
@@ -374,6 +571,18 @@ def write_report(
             f"- **New survivors from diversification:** {screen_stats.get('diversified_survivors_added', 0)}",
             "",
         ]
+    if xref_summary:
+        lines += [
+            "## External cross-reference",
+            "",
+            f"- **Requested compounds:** {xref_summary.get('requested', 0)}",
+            f"- **Queried compounds:** {xref_summary.get('queried', 0)}",
+            f"- **Scope mode:** {xref_summary.get('mode', 'all')} ({xref_summary.get('reason', 'N/A')})",
+            f"- **Projected API time:** ~{xref_summary.get('projected_seconds', 0)}s",
+            f"- **Found in ChEMBL:** {xref_summary.get('chembl_found', 0)}",
+            f"- **Found in PubChem:** {xref_summary.get('pubchem_found', 0)}",
+            "",
+        ]
     lines += [
         "## Target dossier",
         "",
@@ -384,8 +593,7 @@ def write_report(
         lines += [
             "**Grounding warning:** The following cited PMIDs were not in the "
             "provided source abstracts and may be hallucinated: "
-            + ", ".join(u["pmid"] for u in grounding["ungrounded"])
-            + ".",
+            f"{', '.join(u['pmid'] for u in grounding['ungrounded'])}.",
             "",
         ]
     if citations:
@@ -398,12 +606,18 @@ def write_report(
     lines += [
         "## Ranked shortlist",
         "",
-        "| Rank | Score | Confidence | SMILES | Rationale |",
-        "|---|---|---|---|---|",
+        "| Rank | Score | Confidence | ChEMBL ID | PubChem CID | SMILES | Rationale |",
+        "|---|---|---|---|---|---|---|",
     ]
+    xref_by_smiles = {}
+    if enriched_rows:
+        xref_by_smiles = {r.get("smiles", ""): r for r in enriched_rows}
     for r in ranked:
+        xref = xref_by_smiles.get(r.get("smiles", ""), {})
         lines.append(
-            f"| {r['rank']} | {r['score']:.3f} | {r['confidence']} | `{r['smiles']}` | {r['reason']} |"
+            f"| {r['rank']} | {r['score']:.3f} | {r['confidence']} | "
+            f"{xref.get('chembl_id', '') or '-'} | {xref.get('pubchem_cid', '') or '-'} | "
+            f"`{r['smiles']}` | {r['reason']} |"
         )
     lines += [
         "",
@@ -423,10 +637,32 @@ def export_all(
     screen_stats: dict | None = None,
     grounding: dict | None = None,
     provenance: dict | None = None,
-) -> None:
+    progress_callback=None,
+) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_csv(run_dir / "shortlist.csv", ranked)
+
+    _notify_progress(
+        progress_callback,
+        "start",
+        "Starting export for CSV, SDF, and report outputs.",
+    )
+
+    enriched_rows, xref_summary = write_csv(
+        run_dir / "shortlist.csv", ranked, progress_callback
+    )
+
+    _notify_progress(
+        progress_callback,
+        "sdf_prepare",
+        "Preparing 3D structures for .sdf.",
+    )
     write_sdf(run_dir / "shortlist.sdf", ranked)
+
+    _notify_progress(
+        progress_callback,
+        "report_prepare",
+        "Assembling report with rationale and citations.",
+    )
     write_report(
         run_dir / "report.md",
         target,
@@ -437,4 +673,33 @@ def export_all(
         screen_stats=screen_stats,
         grounding=grounding,
         provenance=provenance,
+        enriched_rows=enriched_rows,
+        xref_summary=xref_summary,
     )
+
+    _notify_progress(
+        progress_callback,
+        "finalize",
+        "Finalizing downloads.",
+    )
+
+    xref_by_smiles = {
+        row.get("smiles", ""): {
+            "chembl_id": row.get("chembl_id", "") or "",
+            "pubchem_cid": row.get("pubchem_cid", "") or "",
+            "crossref_queried": bool(row.get("crossref_queried", False)),
+        }
+        for row in enriched_rows
+        if row.get("smiles")
+    }
+
+    return {
+        "xref_summary": xref_summary,
+        "xref_by_smiles": xref_by_smiles,
+        "artifacts": {
+            "csv": str(run_dir / "shortlist.csv"),
+            "sdf": str(run_dir / "shortlist.sdf"),
+            "report": str(run_dir / "report.md"),
+        },
+        "ranked_count": len(ranked),
+    }

@@ -32,6 +32,7 @@ ones make some local models stop calling tools and narrate instead.
 from __future__ import annotations
 
 import asyncio
+import math
 
 from . import chem
 from .store import emit
@@ -295,6 +296,160 @@ def get_ranking_options_schema() -> dict:
     }
 
 
+def get_methods_summary_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_methods_summary",
+            "description": (
+                "Get a concise methods summary: public databases, filtering, "
+                "scoring, diversity, and export steps."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "enum": [
+                            "overview",
+                            "databases",
+                            "filtering",
+                            "scoring",
+                            "diversity",
+                            "export",
+                        ],
+                        "description": "Optional topic focus. Defaults to overview.",
+                    }
+                },
+                "required": [],
+            },
+        },
+    }
+
+
+def get_export_status_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_export_status",
+            "description": "Get current export stage, status, and artifact readiness.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+def get_crossref_summary_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_crossref_summary",
+            "description": "Get cross-reference coverage summary for ChEMBL and PubChem.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+def get_compound_crossref_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_compound_crossref",
+            "description": "Get ChEMBL and PubChem IDs for one ranked molecule or SMILES.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rank": {
+                        "type": "integer",
+                        "description": "1-indexed rank in the shortlist.",
+                    },
+                    "smiles": {
+                        "type": "string",
+                        "description": "Canonical or input SMILES.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    }
+
+
+def compare_ranking_profiles_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "compare_ranking_profiles",
+            "description": "Compare two ranking profiles and preview top-list changes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "profile_a": {
+                        "type": "string",
+                        "enum": ["balanced", "quality", "explore", "strict"],
+                        "description": "First profile.",
+                    },
+                    "profile_b": {
+                        "type": "string",
+                        "enum": ["balanced", "quality", "explore", "strict"],
+                        "description": "Second profile.",
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "How many ranks to compare. Default 20.",
+                    },
+                },
+                "required": ["profile_a", "profile_b"],
+            },
+        },
+    }
+
+
+def get_filter_thresholds_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_filter_thresholds",
+            "description": "Get screening threshold settings and gate policy used in the run.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+def get_report_metadata_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_report_metadata",
+            "description": "Get report provenance, methods summary, and artifact metadata.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+def explain_score_components_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "explain_score_components",
+            "description": "Explain score component contributions for one ranked molecule.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rank": {
+                        "type": "integer",
+                        "description": "1-indexed rank in the shortlist.",
+                    },
+                    "profile": {
+                        "type": "string",
+                        "enum": ["balanced", "quality", "explore", "strict"],
+                        "description": "Optional profile override.",
+                    },
+                },
+                "required": ["rank"],
+            },
+        },
+    }
+
+
 def focus_scaffold_schema() -> dict:
     return {
         "type": "function",
@@ -334,6 +489,14 @@ READ_TOOLS = [
     get_scaffold_summary_schema(),
     get_metric_schema(),
     get_ranking_options_schema(),
+    get_methods_summary_schema(),
+    get_export_status_schema(),
+    get_crossref_summary_schema(),
+    get_compound_crossref_schema(),
+    compare_ranking_profiles_schema(),
+    get_filter_thresholds_schema(),
+    get_report_metadata_schema(),
+    explain_score_components_schema(),
 ]
 
 MUTATE_TOOLS = [
@@ -490,6 +653,311 @@ def _get_ranking_options(run) -> dict:
                 "best_for": "conservative shortlists for downstream synthesis",
             },
         },
+    }
+
+
+def _get_methods_summary(run, topic: str = "overview") -> dict:
+    topic = (topic or "overview").strip().lower()
+    if topic not in {
+        "overview",
+        "databases",
+        "filtering",
+        "scoring",
+        "diversity",
+        "export",
+    }:
+        topic = "overview"
+
+    methods = {
+        "databases": {
+            "chembl": {
+                "uses": [
+                    "Resolve target identifier and preferred target name",
+                    "Fetch known actives (activity records) for similarity anchoring",
+                    "Cross-reference shortlisted compounds by InChIKey in export",
+                ]
+            },
+            "pubmed": {
+                "uses": [
+                    "Fetch abstracts for target dossier generation",
+                    "Attach citation-backed claims to the report",
+                ]
+            },
+            "pubchem": {
+                "uses": [
+                    "Cross-reference shortlisted compounds by InChIKey during export",
+                ]
+            },
+        },
+        "filtering": {
+            "gates": [
+                "SMILES parse validity",
+                "Lipinski Ro5 (default allows up to one violation)",
+                "PAINS alerts",
+                "QED/descriptor sanity checks",
+            ],
+            "source": "RDKit-backed screening in cheminformatics agent tools",
+        },
+        "scoring": {
+            "selected_profile": getattr(run, "ranking_profile", "balanced"),
+            "components": [
+                "max similarity to known actives",
+                "top-k similarity breadth",
+                "QED",
+                "synthetic accessibility",
+                "Lipinski penalty",
+                "PAINS penalty",
+            ],
+            "output": "Ranked shortlist with score, confidence, and rationale",
+        },
+        "diversity": {
+            "shortlist_modes": ["off", "scaffold", "mmr", "cluster"],
+            "human_gate": "Operator may approve export or run diversification + retriage",
+        },
+        "export": {
+            "artifacts": ["shortlist.csv", "shortlist.sdf", "report.md"],
+            "cross_reference": ["ChEMBL ID", "PubChem CID"],
+            "sdf_note": "SDF generation includes 3D conformer embedding with RDKit",
+        },
+    }
+
+    if topic == "overview":
+        return {
+            "topic": "overview",
+            "status": run.status,
+            "target": run.target_name,
+            "summary": {
+                "public_databases": ["ChEMBL", "PubMed", "PubChem"],
+                "pipeline_steps": [
+                    "target resolution + knowledge gathering",
+                    "cheminformatics filtering",
+                    "critic scoring/ranking",
+                    "human approval or diversification rerun",
+                    "export (CSV/SDF/report)",
+                ],
+            },
+            "details": methods,
+        }
+
+    return {"topic": topic, "details": methods[topic]}
+
+
+def _get_export_status(run) -> dict:
+    progress = run.export_progress or {
+        "status": "idle",
+        "stage": "none",
+        "message": "Export has not started.",
+    }
+    artifacts = run.export_artifacts or {}
+    return {
+        "run_status": run.status,
+        "export": progress,
+        "artifacts": artifacts,
+        "artifacts_ready": bool(artifacts),
+    }
+
+
+def _get_crossref_summary(run) -> dict:
+    summary = run.xref_summary
+    if summary:
+        return {
+            "available": True,
+            "source": "export",
+            **summary,
+        }
+
+    if run.xref_by_smiles:
+        rows = list(run.xref_by_smiles.values())
+        return {
+            "available": True,
+            "source": "in_memory",
+            "requested": len(rows),
+            "queried": sum(1 for r in rows if r.get("crossref_queried")),
+            "chembl_found": sum(1 for r in rows if r.get("chembl_id")),
+            "pubchem_found": sum(1 for r in rows if r.get("pubchem_cid")),
+        }
+
+    return {
+        "available": False,
+        "message": "Cross-reference summary not available before export.",
+    }
+
+
+def _resolve_smiles_for_crossref(run, rank: int | None, smiles: str | None) -> str:
+    if rank is not None:
+        if rank < 1 or rank > len(run.ranked):
+            raise ValueError(
+                f"rank {rank} out of range — only {len(run.ranked)} ranked results exist"
+            )
+        return run.ranked[rank - 1]["smiles"]
+    if smiles:
+        can = chem.canonical(smiles)
+        return can or smiles
+    raise ValueError("Provide either rank or smiles.")
+
+
+def _get_compound_crossref(
+    run,
+    rank: int | None = None,
+    smiles: str | None = None,
+) -> dict:
+    target_smiles = _resolve_smiles_for_crossref(run, rank, smiles)
+    ref = run.xref_by_smiles.get(target_smiles)
+    if not ref:
+        return {
+            "available": False,
+            "smiles": target_smiles,
+            "message": "Cross-reference not available for this molecule yet.",
+        }
+
+    out = {
+        "available": True,
+        "smiles": target_smiles,
+        "chembl_id": ref.get("chembl_id", "") or "",
+        "pubchem_cid": ref.get("pubchem_cid", "") or "",
+        "crossref_queried": bool(ref.get("crossref_queried", False)),
+    }
+    if rank is not None:
+        out["rank"] = rank
+    return out
+
+
+def _compare_ranking_profiles(
+    run,
+    profile_a: str,
+    profile_b: str,
+    top_n: int = 20,
+) -> dict:
+    a_ranked, _, a_profile = _score_survivors(run, {}, profile=profile_a)
+    b_ranked, _, b_profile = _score_survivors(run, {}, profile=profile_b)
+
+    top_n = max(1, int(top_n or 20))
+    a_top = a_ranked[:top_n]
+    b_top = b_ranked[:top_n]
+    a_smiles = {r["smiles"] for r in a_top}
+    b_smiles = {r["smiles"] for r in b_top}
+
+    return {
+        "profile_a": a_profile,
+        "profile_b": b_profile,
+        "top_n": top_n,
+        "entering_profile_b": list(b_smiles - a_smiles)[:_MAX_EXAMPLES],
+        "leaving_profile_b": list(a_smiles - b_smiles)[:_MAX_EXAMPLES],
+        "avg_score_profile_a": round(
+            sum(r["score"] for r in a_top) / max(1, len(a_top)), 3
+        ),
+        "avg_score_profile_b": round(
+            sum(r["score"] for r in b_top) / max(1, len(b_top)), 3
+        ),
+    }
+
+
+def _get_filter_thresholds(run) -> dict:
+    st = run.screen_stats or {}
+    return {
+        "thresholds": {
+            "mw_max": st.get("mw_max", 500),
+            "logp_max": st.get("logp_max", 5),
+            "hbd_max": st.get("hbd_max", 5),
+            "hba_max": st.get("hba_max", 10),
+            "max_lipinski_violations": st.get("max_violations", 1),
+            "pains_policy": "drop_if_any_alert",
+        },
+        "source": "last screening pass",
+    }
+
+
+def _get_report_metadata(run) -> dict:
+    return {
+        "target": run.target_name,
+        "run_status": run.status,
+        "provenance": run.provenance,
+        "export": {
+            "status": (run.export_progress or {}).get("status", "idle"),
+            "stage": (run.export_progress or {}).get("stage", "none"),
+            "artifacts": run.export_artifacts or {},
+        },
+        "methods": _get_methods_summary(run, "overview"),
+    }
+
+
+def _explain_score_components(
+    run,
+    rank: int,
+    profile: str | None = None,
+) -> dict:
+    if rank < 1 or rank > len(run.ranked):
+        raise ValueError(
+            f"rank {rank} out of range — only {len(run.ranked)} ranked results exist"
+        )
+
+    ranked_row = run.ranked[rank - 1]
+    smi = ranked_row["smiles"]
+    survivor = next((s for s in run.survivors if s.get("smiles") == smi), None)
+    if not survivor:
+        raise ValueError("could not locate survivor record for ranked molecule")
+
+    selected_profile = (profile or getattr(run, "ranking_profile", "balanced")).lower()
+    cfg = chem.resolve_ranking_profile(selected_profile)
+    weights = cfg["weights"]
+    score_mode = cfg["score_mode"]
+    confidence_policy = cfg["confidence_policy"]
+
+    sim = survivor["max_similarity"]
+    breadth = survivor.get("top_k_avg", sim)
+    qed = 0.45 if survivor.get("qed") is None else survivor["qed"]
+    sa = survivor.get("sa_score")
+    sa_term = 0.5 if sa is None else 1.0 - sa
+    n_viol = len(survivor.get("lipinski_violations", []))
+    n_pains = survivor.get("n_pains_alerts", 1 if survivor.get("pains_flag") else 0)
+
+    if (score_mode or "classic").lower() == "enhanced":
+        sim_term = 1.0 - math.exp(-2.2 * max(0.0, sim))
+        breadth_term = 1.0 - math.exp(-1.8 * max(0.0, breadth))
+        lip_pen = weights["penalty_lipinski"] * (n_viol**1.2)
+        pains_pen = weights["penalty_pains"] * (n_pains**1.35)
+        positive = sum(
+            [
+                weights["similarity"] * sim_term,
+                weights["breadth"] * breadth_term,
+                weights["qed"] * qed,
+                weights["sa"] * sa_term,
+            ]
+        )
+        raw = positive - lip_pen - pains_pen
+        score = round(
+            max(0.0, min(1.0 / (1.0 + math.exp(-(raw - 0.32) / 0.14)), 1.0)), 3
+        )
+    else:
+        sim_term = sim
+        breadth_term = breadth
+        lip_pen = weights["penalty_lipinski"] * n_viol
+        pains_pen = weights["penalty_pains"] * n_pains
+        score = chem.compute_score(survivor, weights, score_mode=score_mode)
+
+    confidence = chem._confidence(
+        score,
+        sim,
+        survivor.get("lipinski_pass", True),
+        confidence_policy,
+    )
+
+    return {
+        "rank": rank,
+        "smiles": smi,
+        "profile": selected_profile,
+        "score_mode": score_mode,
+        "score": score,
+        "confidence": confidence,
+        "components": {
+            "similarity_term": round(sim_term, 3),
+            "breadth_term": round(breadth_term, 3),
+            "qed_term": round(qed, 3),
+            "sa_term": round(sa_term, 3),
+            "lipinski_penalty": round(lip_pen, 3),
+            "pains_penalty": round(pains_pen, 3),
+        },
+        "weights": weights,
     }
 
 
@@ -841,6 +1309,22 @@ async def execute_chat_tool(run, name: str, args: dict) -> dict:
         return _get_metric(run)
     if name == "get_ranking_options":
         return _get_ranking_options(run)
+    if name == "get_methods_summary":
+        return _get_methods_summary(run, **args)
+    if name == "get_export_status":
+        return _get_export_status(run)
+    if name == "get_crossref_summary":
+        return _get_crossref_summary(run)
+    if name == "get_compound_crossref":
+        return _get_compound_crossref(run, **args)
+    if name == "compare_ranking_profiles":
+        return _compare_ranking_profiles(run, **args)
+    if name == "get_filter_thresholds":
+        return _get_filter_thresholds(run)
+    if name == "get_report_metadata":
+        return _get_report_metadata(run)
+    if name == "explain_score_components":
+        return _explain_score_components(run, **args)
     if name == "explain":
         return _explain(run, **args)
     if name == "why_not":

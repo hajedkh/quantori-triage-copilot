@@ -77,7 +77,7 @@ async def export_node(state: GState):
     from pathlib import Path
 
     runs_dir = Path(__file__).resolve().parent.parent / "runs"
-    export.export_all(
+    result = export.export_all(
         runs_dir / run.id,
         run.target_name,
         run.dossier,
@@ -88,6 +88,14 @@ async def export_node(state: GState):
         grounding=run.grounding,
         provenance=run.provenance,
     )
+    run.xref_summary = result.get("xref_summary")
+    run.xref_by_smiles = result.get("xref_by_smiles", {})
+    run.export_artifacts = result.get("artifacts")
+    run.export_progress = {
+        "status": "completed",
+        "stage": "done",
+        "message": "Export completed.",
+    }
     run.status = "exported"
     return {}
 
@@ -159,11 +167,34 @@ async def resume(run_id: str):
     from pathlib import Path
 
     runs_dir = Path(__file__).resolve().parent.parent / "runs"
+
+    def _progress(stage: str, message: str):
+        run.export_progress = {
+            "status": "running",
+            "stage": stage,
+            "message": message,
+        }
+        emit(
+            run,
+            {
+                "type": "export_progress",
+                "payload": {
+                    "stage": stage,
+                    "message": message,
+                },
+            },
+        )
+
+    run.export_progress = {
+        "status": "running",
+        "stage": "start",
+        "message": "Starting export.",
+    }
     try:
         # Offload the CPU-bound export (SDF 3D embedding, CSV/report writing)
         # to a worker thread so it doesn't block the event loop while the
         # /approve request is in flight.
-        await asyncio.to_thread(
+        result = await asyncio.to_thread(
             export.export_all,
             runs_dir / run.id,
             run.target_name,
@@ -174,12 +205,26 @@ async def resume(run_id: str):
             run.screen_stats,
             run.grounding,
             run.provenance,
+            _progress,
         )
+        run.xref_summary = result.get("xref_summary")
+        run.xref_by_smiles = result.get("xref_by_smiles", {})
+        run.export_artifacts = result.get("artifacts")
     except Exception:
         # Surfaces as a 500 to the /approve caller; log the traceback so the
         # cause is visible server-side rather than just the HTTP error.
         logger.exception("export failed for run %s", run_id)
+        run.export_progress = {
+            "status": "failed",
+            "stage": "error",
+            "message": "Export failed.",
+        }
         raise
+    run.export_progress = {
+        "status": "completed",
+        "stage": "done",
+        "message": "Export completed.",
+    }
     run.status = "exported"
 
 
