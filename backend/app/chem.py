@@ -166,7 +166,9 @@ def lipinski_violations(
     hbd_max: int = 5,
     hba_max: int = 10,
 ) -> list[str]:
-    """Return list of violated Ro5 criteria (empty = fully compliant)."""
+    """
+    Return list of violated Ro5 criteria (empty = fully compliant).
+    """
     violations = []
     if d["mw"] > mw_max:
         violations.append(f"MW {d['mw']} > {mw_max}")

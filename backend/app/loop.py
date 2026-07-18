@@ -31,6 +31,10 @@ async def run_tool_loop(
     cfg=None,
     max_iters: int = 6,
 ) -> str:
+    """
+    Run the LLM tool-calling loop for one agent, emitting events to the run's SSE
+    stream. Returns the final text output (or empty string if the model never
+    produced plain text)."""
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},

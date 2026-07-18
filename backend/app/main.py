@@ -43,7 +43,9 @@ app.add_middleware(
 
 
 def parse_candidates(raw: bytes) -> list[dict]:
-    """Parse an uploaded CSV/SMI into [{smiles,label}]. Flexible about columns."""
+    """
+    Parse an uploaded CSV/SMI into [{smiles,label}]. Flexible about columns.
+    """
     text = raw.decode("utf-8", errors="ignore")
     out: list[dict] = []
     sniff = text.splitlines()

@@ -4,6 +4,7 @@ The CSV is the primary downstream artifact for cheminformatics triage.
 It includes the full Lipinski Ro5 breakdown, extended ADME descriptors,
 structural keys (InChIKey, Murcko scaffold), and scoring provenance,
 all computed fresh from the ranked SMILES at export time.
+
 """
 
 from __future__ import annotations

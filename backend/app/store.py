@@ -29,8 +29,7 @@ class Run:
     )
 
 
-# run_id -> Run
-RUNS: dict[str, Run] = {}
+RUNS: dict[str, Run] = {}  # run_id -> Run
 
 
 def emit(run: Run, event: dict) -> None:
