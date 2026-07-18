@@ -372,7 +372,7 @@ def _get_agent_trace(run, n: int = 15) -> dict:
     }
 
 
-def _get_ranked(run, n: int = 20) -> dict:
+def _get_ranked(run, n: int = 250) -> dict:
     subset = run.ranked[:n]
     return {
         "count": len(subset),
