@@ -243,9 +243,9 @@ export default function ApproveBar({
               Max new compounds
               <input
                 type="number"
-                min={1}
+                min={10}
                 max={5000}
-                step={1}
+                step={10}
                 value={maxGenerated}
                 onChange={(e) => setMaxGenerated(Math.max(1, Number(e.target.value) || 1))}
               />
