@@ -323,6 +323,7 @@ def screen(
             {
                 "smiles": Chem.MolToSmiles(mol),
                 "label": c.get("label"),
+                "compound_id": c.get("compound_id", "") or "",
                 "is_diversified_generated": bool(c.get("is_diversified_generated")),
                 **d,
                 "qed": qed,
@@ -422,6 +423,7 @@ def generate_diversified_candidates(
                 {
                     "smiles": smi,
                     "label": None,
+                    "compound_id": "",
                     "is_diversified_generated": True,
                 }
             )
@@ -492,6 +494,7 @@ def _process_one(work_item: tuple[dict, dict]) -> dict:
         "status": "survivor",
         "smiles": Chem.MolToSmiles(mol),
         "label": candidate.get("label"),
+        "compound_id": candidate.get("compound_id", "") or "",
         "is_diversified_generated": bool(candidate.get("is_diversified_generated")),
         **d,
         "qed": qed_val,
@@ -1113,6 +1116,7 @@ def rank(
         )
         scored.append(
             {
+                "compound_id": s.get("compound_id", "") or "",
                 "smiles": s["smiles"],
                 "score": score,
                 "confidence": conf,

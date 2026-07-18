@@ -568,6 +568,7 @@ def _get_ranked(run, n: int = 250) -> dict:
         "results": [
             {
                 "rank": r["rank"],
+                "compound_id": r.get("compound_id", "") or "",
                 "smiles": r["smiles"],
                 "score": r["score"],
                 "confidence": r["confidence"],
@@ -1006,6 +1007,7 @@ def _explain(run, rank: int) -> dict:
     r = run.ranked[rank - 1]
     return {
         "rank": r["rank"],
+        "compound_id": r.get("compound_id", "") or "",
         "smiles": r["smiles"],
         "reason": r["reason"],
         "evidence_used": r.get("evidence_used", []),
@@ -1145,6 +1147,7 @@ def _score_survivors(
         )
         scored.append(
             {
+                "compound_id": s.get("compound_id", "") or "",
                 "smiles": s["smiles"],
                 "score": score,
                 "confidence": conf,

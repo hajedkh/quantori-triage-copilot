@@ -24,6 +24,7 @@ export interface FunnelState {
 
 export interface RankedMol {
   rank: number;
+  compound_id?: string;
   smiles: string;
   score: number;
   confidence: Confidence;

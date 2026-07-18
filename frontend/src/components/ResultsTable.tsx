@@ -141,6 +141,7 @@ export default function ResultsTable({ ranked, diversity, runId }: Props) {
                 </div>
 
                 <div style={{ minWidth: 0 }}>
+                  {m.compound_id && <div className="smiles-id">{m.compound_id}</div>}
                   <div className="smiles-txt">{m.smiles}</div>
                   <div className="smiles-sub">
                     ~{m.max_similarity.toFixed(2)} Tanimoto · nearest {m.nearest_active}
@@ -194,6 +195,9 @@ export default function ResultsTable({ ranked, diversity, runId }: Props) {
                   <div className="prov-facts">
                     <div className="prov-reason">{m.reason}</div>
                     <div className="prov-kv">
+                      <span className="kv">
+                        compound id <b>{m.compound_id || "-"}</b>
+                      </span>
                       <span className="kv">
                         similarity <b>{m.max_similarity.toFixed(2)}</b>
                       </span>

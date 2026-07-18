@@ -376,6 +376,7 @@ def _rank_survivors(
         nearest = active_ids[idx] if 0 <= idx < len(active_ids) else s["nearest_active"]
         scored.append(
             {
+                "compound_id": s.get("compound_id", "") or "",
                 "smiles": s["smiles"],
                 "score": score,
                 "confidence": conf,

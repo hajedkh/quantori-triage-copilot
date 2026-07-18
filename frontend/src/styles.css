@@ -1895,6 +1895,16 @@ button {
   white-space: nowrap;
 }
 
+.smiles-id {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--teal);
+  margin-bottom: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .smiles-sub {
   font-family: var(--mono);
   font-size: 11px;

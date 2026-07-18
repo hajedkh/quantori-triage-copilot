@@ -14,6 +14,35 @@ from . import chem, sources, llm, tools, loop
 from .store import emit
 
 
+def _assign_diversified_ids(run, generated: list[dict]) -> list[dict]:
+    existing_ids = {
+        str(row.get("compound_id", "")).strip()
+        for collection in (
+            run.candidates,
+            run.survivors,
+            run.ranked,
+            getattr(run, "diversified_candidates", []) or [],
+        )
+        for row in collection
+        if str(row.get("compound_id", "")).strip()
+    }
+    next_num = 1
+
+    for row in generated:
+        current = str(row.get("compound_id", "")).strip()
+        if current and current not in existing_ids:
+            existing_ids.add(current)
+            continue
+        while True:
+            candidate_id = f"DIV-{next_num:04d}"
+            next_num += 1
+            if candidate_id not in existing_ids:
+                row["compound_id"] = candidate_id
+                existing_ids.add(candidate_id)
+                break
+    return generated
+
+
 # ---------------- Supervisor ----------------
 async def supervisor(run):
     emit(run, {"type": "agent_start", "agent": "supervisor"})
@@ -468,6 +497,7 @@ async def diversifier(run):
         cutoff=cutoff,
         max_generated=max_generated,
     )
+    generated = _assign_diversified_ids(run, generated)
     run.ranked = new_ranked
     run.diversified_candidates = generated
     run.diversified_seed_count = gen_stats.get("seed_count", 0)

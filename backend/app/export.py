@@ -35,6 +35,7 @@ except ImportError:
 _CSV_COLUMNS = [
     # --- Ranking ---
     "rank",
+    "compound_id",
     "smiles",
     "score",
     "confidence",
@@ -117,6 +118,7 @@ def _enrich_row(r: dict) -> dict:
     return {
         # ranking
         "rank": r.get("rank", ""),
+        "compound_id": r.get("compound_id", "") or "",
         "smiles": r["smiles"],
         "score": (
             f"{float(r.get('score')):.3f}" if r.get("score") not in (None, "") else ""
@@ -476,6 +478,8 @@ def write_sdf(
 
         # Ranking fields
         out_mol.SetProp("rank", str(r.get("rank", "")))
+        if r.get("compound_id"):
+            out_mol.SetProp("compound_id", str(r.get("compound_id")))
         out_mol.SetProp("score", f'{r["score"]:.3f}')
         out_mol.SetProp("confidence", r.get("confidence", ""))
         out_mol.SetProp("nearest_active", str(r.get("nearest_active", "")))
@@ -601,8 +605,8 @@ def write_report(
     lines += [
         "## Ranked shortlist",
         "",
-        "| Rank | Score | Confidence | ChEMBL ID | PubChem CID | SMILES | Rationale |",
-        "|---|---|---|---|---|---|---|",
+        "| Rank | Compound ID | Score | Confidence | ChEMBL ID | PubChem CID | SMILES | Rationale |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     xref_by_smiles = {}
     if enriched_rows:
@@ -610,7 +614,7 @@ def write_report(
     for r in ranked:
         xref = xref_by_smiles.get(r.get("smiles", ""), {})
         lines.append(
-            f"| {r['rank']} | {r['score']:.3f} | {r['confidence']} | "
+            f"| {r['rank']} | {r.get('compound_id', '') or '-'} | {r['score']:.3f} | {r['confidence']} | "
             f"{xref.get('chembl_id', '') or '-'} | {xref.get('pubchem_cid', '') or '-'} | "
             f"`{r['smiles']}` | {r['reason']} |"
         )

@@ -50,7 +50,10 @@ app.add_middleware(
 
 def parse_candidates(raw: bytes) -> list[dict]:
     """
-    Parse an uploaded CSV/SMI into [{smiles,label}]. Flexible about columns.
+    Parse an uploaded CSV/SMI into [{smiles,label,compound_id}].
+
+    If the CSV contains both `id` and `name`, prefer `id` as the human-facing
+    compound identifier carried through UI and export.
     """
     text = raw.decode("utf-8", errors="ignore")
     out: list[dict] = []
@@ -61,15 +64,17 @@ def parse_candidates(raw: bytes) -> list[dict]:
         cols = {c.lower(): c for c in (reader.fieldnames or [])}
         smi_col = cols.get("smiles")
         label_col = cols.get("label") or cols.get("activity")
+        id_col = cols.get("id") or cols.get("name")
         for row in reader:
             smi = (row.get(smi_col) or "").strip()
             if not smi:
                 continue
             label = None
+            compound_id = (row.get(id_col) or "").strip() if id_col else ""
             if label_col:
                 v = (row.get(label_col) or "").strip().lower()
                 label = v in ("active", "1", "true", "yes")
-            out.append({"smiles": smi, "label": label})
+            out.append({"smiles": smi, "label": label, "compound_id": compound_id})
         return out
 
     for line in sniff:
@@ -78,7 +83,7 @@ def parse_candidates(raw: bytes) -> list[dict]:
             continue
         smi = line.split()[0].split(",")[0].strip()
         if smi:
-            out.append({"smiles": smi, "label": None})
+            out.append({"smiles": smi, "label": None, "compound_id": ""})
     return out
 
 
