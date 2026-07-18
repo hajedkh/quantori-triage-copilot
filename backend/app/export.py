@@ -9,6 +9,8 @@ all computed fresh from the ranked SMILES at export time.
 
 from __future__ import annotations
 import csv
+import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from rdkit import Chem
 
@@ -181,34 +183,99 @@ def _embed_3d(mol):
     return mol
 
 
-def write_sdf(path: Path, ranked: list[dict], gen_3d: bool = True) -> None:
+# Below this count, spinning up a process pool costs more than it saves, so
+# embedding runs serially instead.
+_PARALLEL_MIN = 4
+
+
+def _embed_worker(smiles: str) -> tuple[str | None, str]:
+    """Process-pool worker: parse a SMILES and generate a 3D conformer.
+
+    Runs in a separate process, so it takes and returns only picklable values
+    (strings) — never RDKit Mol objects. Returns (molblock, status); the parent
+    re-parses the molblock. randomSeed is fixed inside _embed_3d, so the
+    conformer for a given SMILES is identical whether produced here or serially.
+    """
+    mol = chem.parse(smiles)
+    if mol is None:
+        return None, "parse_failed"
+    mol_3d = _embed_3d(mol)
+    if mol_3d is None:
+        return None, "2D_only"
+    # The molblock carries the 3D coordinates + explicit Hs from _embed_3d.
+    return Chem.MolToMolBlock(mol_3d, includeStereo=True), "MMFF94_optimized"
+
+
+def _embed_all(
+    smiles_list: list[str], gen_3d: bool, max_workers: int | None
+) -> list[tuple[str | None, str]]:
+    """Generate 3D conformers for every SMILES, parallelized when worthwhile.
+
+    Returns a list of (molblock_or_None, status) aligned 1:1 with smiles_list,
+    order preserved. Falls back to a serial pass when 3D is disabled, the set
+    is tiny, or the process pool can't be created (restricted sandbox, etc.) —
+    export must never break just because parallelism was unavailable.
+    """
+    n = len(smiles_list)
+    if not gen_3d:
+        return [(None, "2D_only")] * n
+
+    serial = n < _PARALLEL_MIN or (max_workers is not None and max_workers <= 1)
+    if not serial:
+        workers = max_workers or min(os.cpu_count() or 1, n)
+        if workers > 1:
+            # Chunk so IPC overhead stays small relative to per-molecule work.
+            chunksize = max(1, n // (workers * 4))
+            try:
+                with ProcessPoolExecutor(max_workers=workers) as ex:
+                    return list(ex.map(_embed_worker, smiles_list, chunksize=chunksize))
+            except Exception:
+                pass  # fall through to serial
+
+    return [_embed_worker(s) for s in smiles_list]
+
+
+def write_sdf(
+    path: Path,
+    ranked: list[dict],
+    gen_3d: bool = True,
+    max_workers: int | None = None,
+) -> dict:
     """Write SDF with 3D conformers (ETKDG + MMFF94) and all computed properties.
 
     When gen_3d is True (default), each molecule gets a force-field-optimized
-    3D conformer. Molecules that fail embedding are written as 2D.
+    3D conformer. The embedding step — the bottleneck — is parallelized across
+    processes (defaults to one per CPU). Molecules that fail embedding are
+    written as 2D. Pass max_workers=1 to force the old serial behavior.
+
+    Descriptors are still computed in-process from a clean parse of each SMILES,
+    exactly as before, so property values are unchanged from the serial version.
     """
+    smiles_list = [r["smiles"] for r in ranked]
+    embedded = _embed_all(smiles_list, gen_3d, max_workers)
+
     w = Chem.SDWriter(str(path))
     n_3d = n_2d = 0
 
-    for r in ranked:
-        mol = chem.parse(r["smiles"])
-        if mol is None:
-            continue
+    for r, (molblock, status) in zip(ranked, embedded):
+        # base_mol: clean no-H parse, used for descriptors and as the 2D body.
+        base_mol = chem.parse(r["smiles"])
+        if base_mol is None:
+            continue  # unparseable SMILES — skip, matches serial behavior
 
-        ext = chem.extended_descriptors(mol)
+        ext = chem.extended_descriptors(base_mol)
 
-        # Attempt 3D conformer generation
-        mol_3d = None
-        if gen_3d:
-            mol_3d = _embed_3d(mol)
+        if status == "MMFF94_optimized" and molblock:
+            out_mol = Chem.MolFromMolBlock(molblock, removeHs=False)
+            if out_mol is None:  # defensive: molblock round-trip failed
+                out_mol, status = base_mol, "2D_only"
+        else:
+            out_mol, status = base_mol, "2D_only"
 
-        if mol_3d is not None:
-            out_mol = mol_3d
-            out_mol.SetProp("_3d_status", "MMFF94_optimized")
+        out_mol.SetProp("_3d_status", status)
+        if status == "MMFF94_optimized":
             n_3d += 1
         else:
-            out_mol = mol
-            out_mol.SetProp("_3d_status", "2D_only")
             n_2d += 1
 
         # Ranking fields
