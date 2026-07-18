@@ -44,6 +44,16 @@ async def knowledge(run):
     dossier, citations = await llm.build_dossier(run.target_name, abstracts)
     run.dossier = dossier
     run.citations = citations
+    run.grounding = grounding
+    if grounding.get("ungrounded"):
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "knowledge",
+                "payload": f"Warning: {len(grounding['ungrounded'])} citation(s) could not be grounded to provided sources.",
+            },
+        )
     # stream the dossier word by word — the text already exists in full,
     # this just replays it as a typing effect for the frontend
     for tok in dossier.split(" "):
@@ -52,45 +62,132 @@ async def knowledge(run):
     emit(run, {"type": "agent_done", "agent": "knowledge"})
 
 
+# ---- Prompt variants — compact versions for small local models ----
+# Mistral, Llama, and similar models fail with verbose prompts: they stop
+# calling tools and narrate instead. These tight prompts have been tested
+# with mistral:7b via Ollama.
+
+_CHEM_PROMPT_COMPACT = (
+    "You filter candidate molecules using your tools. "
+    "Call screen_candidates first with default parameters. "
+    "Then call get_funnel_stats to check the result. "
+    "If survivors < 20, re-screen with looser thresholds. "
+    "If survivors > 500, re-screen with tighter thresholds. "
+    "Reply with a short summary when done."
+)
+
+_CRITIC_PROMPT_COMPACT = (
+    "You rank the filtered molecules. "
+    "Call get_funnel_stats first. "
+    "Then call rank_survivors with default weights. "
+    "Then call submit_ranking with yield_ok=true and empty evidence_notes. "
+    "Reply with a short summary when done."
+)
+
+
+def _is_small_model(cfg) -> bool:
+    """Detect if the active LLM config points to a small local model
+    that needs compact prompts."""
+    if cfg is None:
+        return False
+    provider = getattr(cfg, "provider", "")
+    model = getattr(cfg, "model", "").lower()
+    if provider == "ollama":
+        return True
+    # Small models by name
+    small_patterns = ["mistral", "llama", "phi", "gemma", "qwen2", "tinyllama"]
+    return any(p in model for p in small_patterns)
+
+
 # ---------------- Cheminformatics (real tool-calling agent) ----------------
 async def cheminformatics(run):
     emit(run, {"type": "agent_start", "agent": "cheminformatics"})
     emit(run, {"type": "log", "agent": "cheminformatics",
                "payload": "Agentic filtering — deciding thresholds and strategy…"})
 
-    system_prompt = (
-        "You are the Cheminformatics agent in a drug-discovery triage pipeline. "
-        "You have RDKit-backed tools to filter and inspect a candidate molecule "
-        "library against known active binders for a target. Decide which filters "
-        "to apply and at what thresholds yourself — there is no fixed recipe or "
-        "required order. Justify every choice you make. Aim to end with roughly "
-        "20-200 survivors: far fewer means you over-filtered and should loosen "
-        "thresholds and re-screen; far more means you under-filtered and should "
-        "tighten. "
-        "Act through your tools — do not describe a plan in prose before doing "
-        "anything. Your very first reply must be a tool call, not text. Only once "
-        "you have actually screened the library and are satisfied with the "
-        "survivor set should you stop calling tools and reply with a short "
-        "plain-text summary of your final filtering strategy and why you chose it."
-    )
+    cfg = llm.get_active_config()
+    small = _is_small_model(cfg)
+
+    if small:
+        system_prompt = _CHEM_PROMPT_COMPACT
+    else:
+        system_prompt = (
+            "You are the Cheminformatics agent in a drug-discovery triage pipeline. "
+            "You have RDKit-backed tools to filter and inspect a candidate molecule "
+            "library against known active binders for a target. Your tools handle "
+            "Lipinski Ro5 (allowing up to 1 violation by default, as per the real "
+            "rule — many marketed drugs have one violation), PAINS substructure "
+            "alerts (with specific alert names for interpretability), QED, and "
+            "Tanimoto similarity via Morgan fingerprints (radius 2, 2048-bit, "
+            "chirality-aware).\n\n"
+            "Decide which filters to apply and at what thresholds yourself — there "
+            "is no fixed recipe or required order. Justify every choice you make "
+            "with reference to the target class and candidate library properties. "
+            "For example, if the target is a kinase, you might note that kinase "
+            "inhibitors sometimes exceed MW 500 and relax that threshold; if the "
+            "library is fragment-like, default Lipinski may be too permissive.\n\n"
+            "Aim to end with roughly 20-200 survivors: far fewer means you likely "
+            "over-filtered (loosen and re-screen); far more means under-filtered "
+            "(tighten). However, if the data genuinely calls for a count outside "
+            "that range, report and justify it rather than gaming thresholds to hit "
+            "a headcount.\n\n"
+            "After screening, spot-check a few survivors with compute_descriptors "
+            "and similarity_to_actives to sanity-check the results before "
+            "finalizing. Review the funnel stats to confirm drop reasons are "
+            "reasonable.\n\n"
+            "Act through your tools — do not describe a plan in prose before doing "
+            "anything. Your very first reply must be a tool call, not text. Only "
+            "once you have actually screened the library and are satisfied with the "
+            "survivor set should you stop calling tools and reply with a short "
+            "plain-text summary of your final filtering strategy, the rationale "
+            "for each threshold choice, and any concerns about the survivor set."
+        )
+
     user_msg = (
         f"Triage {len(run.candidates)} candidate molecules for target "
         f"{run.target_name} ({run.target_id or 'unresolved'}). "
         f"{len(run.known_actives)} known active binders are available for "
-        f"similarity scoring. Begin now by calling a tool — don't just describe "
-        f"what you would do."
+        f"similarity scoring. Call screen_candidates now."
     )
 
     async def executor(name, args):
         return await tools.execute_tool(run, name, args)
 
-    cfg = llm.get_active_config()  # whatever provider/model is selected in the UI
     summary = await loop.run_tool_loop(
         run, "cheminformatics", system_prompt, user_msg, tools.CHEM_TOOLS, executor, cfg=cfg
     )
 
-    emit(run, {"type": "log", "agent": "cheminformatics",
-               "payload": summary.strip() if summary else "Filtering complete."})
+    # ---- Deterministic fallback ----
+    # If the agent loop failed to produce survivors (model errored, narrated
+    # instead of calling tools, or never called screen_candidates), run
+    # screening with safe defaults so the pipeline always produces output.
+    if not run.survivors:
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "cheminformatics",
+                "payload": "Agent produced no survivors — running deterministic screen with defaults…",
+            },
+        )
+        fallback_result = await tools.execute_tool(run, "screen_candidates", {})
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "cheminformatics",
+                "payload": f"Fallback screen: {fallback_result.get('stats', {}).get('survivors', 0)} survivors",
+            },
+        )
+
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "cheminformatics",
+            "payload": summary.strip() if summary else "Filtering complete.",
+        },
+    )
     emit(run, {"type": "agent_done", "agent": "cheminformatics"})
 
 
@@ -121,26 +218,42 @@ async def critic(run):
     emit(run, {"type": "log", "agent": "critic",
                "payload": "Agentic scoring — gathering evidence before ranking…"})
 
-    system_prompt = (
-        "You are the Critic/Ranking agent in a drug-discovery triage pipeline. "
-        "Survivors from the Cheminformatics agent's filtering are ready to be "
-        "scored and ranked. You MUST fetch evidence with your tools before "
-        "scoring — never score blind. Check the filtering results, choose score "
-        "weights (similarity / QED / PAINS-clean) you can justify, then call "
-        "rank_survivors to produce the final ranking; the numeric scores are "
-        "computed by RDKit underneath, not by you — you choose weights and write "
-        "the explanation, the science is never hallucinated. "
-        "When done, reply with ONLY a JSON object, no markdown fences, no prose, "
-        "matching exactly this shape: "
-        '{"ranked":[{"smiles":str,"score":float,"confidence":str,"reason":str,'
-        '"evidence_used":[str]}],"yield_ok":bool,"replan_reason":str_or_null}. '
-        '"evidence_used" names which tool results backed your judgment for that '
-        'row. "yield_ok" is false only if the ranked set is clearly too small or '
-        'too large to be useful — explain why in "replan_reason", else null.'
-    )
+    cfg = llm.get_active_config()
+    small = _is_small_model(cfg)
+
+    if small:
+        system_prompt = _CRITIC_PROMPT_COMPACT
+    else:
+        system_prompt = (
+            "You are the Critic/Ranking agent in a drug-discovery triage pipeline. "
+            "Survivors from the Cheminformatics agent's filtering are ready to be "
+            "scored and ranked. You MUST fetch evidence with your tools before "
+            "scoring — never score blind.\n\n"
+            "The scoring formula has six components you can weight:\n"
+            "- similarity (default 0.40): max Tanimoto to nearest known active\n"
+            "- breadth (default 0.15): top-3 average Tanimoto (rewards multi-active coverage)\n"
+            "- qed (default 0.20): drug-likeness composite\n"
+            "- sa (default 0.15): synthetic accessibility (inverted: easy to make = high score)\n"
+            "- penalty_lipinski (default 0.05): deducted per Ro5 violation\n"
+            "- penalty_pains (default 0.03): deducted per PAINS alert\n\n"
+            "After scoring, diversity reranking clusters by Bemis-Murcko scaffold "
+            "so the top-N covers distinct chemotypes. You can disable this.\n\n"
+            "Workflow:\n"
+            "1. Call get_funnel_stats to understand what the cheminformatics agent did.\n"
+            "2. Spot-check a few survivors with compute_descriptors to verify quality.\n"
+            "3. Choose weights you can justify for this target class, then call "
+            "rank_survivors. The numeric scores are computed by RDKit.\n"
+            "4. Call submit_ranking with per-compound evidence notes listing which "
+            "tool results backed your judgment. Use canonical SMILES exactly as "
+            "they appear in the rank_survivors output. Set yield_ok=false only if "
+            "the ranked set is clearly too small or too large to be useful.\n\n"
+            "Your very first reply must be a tool call, not text. Stop calling "
+            "tools after submit_ranking and reply with a one-sentence summary."
+        )
+
     user_msg = (
         f"{len(run.survivors)} survivors are ready to rank for target "
-        f"{run.target_name}. Gather evidence, choose weights, score, and justify."
+        f"{run.target_name}. Call get_funnel_stats now."
     )
 
     async def executor(name, args):
