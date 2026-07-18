@@ -357,7 +357,7 @@ export function buildCsv(ranked: RankedMol[]): string {
   const head = "rank,smiles,score,confidence,nearest_active,max_similarity,reason";
   const rows = ranked.map(
     (r) =>
-      `${r.rank},"${r.smiles}",${r.score},${r.confidence},${r.nearest_active},${r.max_similarity},"${r.reason.replace(/"/g, "'")}"`
+      `${r.rank},"${r.smiles}",${r.score.toFixed(3)},${r.confidence},${r.nearest_active},${r.max_similarity},"${r.reason.replace(/"/g, "'")}"`
   );
   return [head, ...rows].join("\n");
 }

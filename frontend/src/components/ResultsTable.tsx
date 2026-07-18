@@ -126,7 +126,7 @@ export default function ResultsTable({ ranked, diversity }: Props) {
 
                 <div className="col-score score-bar-wrap">
                   <span className="score-val" style={{ color: scoreColor(m.confidence) }}>
-                    {m.score.toFixed(2)}
+                    {m.score.toFixed(3)}
                   </span>
                   <div className="score-track">
                     <div
@@ -164,7 +164,7 @@ export default function ResultsTable({ ranked, diversity }: Props) {
                         nearest active <b>{m.nearest_active}</b>
                       </span>
                       <span className="kv">
-                        score <b>{m.score.toFixed(2)}</b>
+                        score <b>{m.score.toFixed(3)}</b>
                       </span>
                       <span className="kv">
                         confidence <b>{m.confidence}</b>

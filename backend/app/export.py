@@ -94,7 +94,11 @@ def _enrich_row(r: dict) -> dict:
         # ranking
         "rank": r.get("rank", ""),
         "smiles": r["smiles"],
-        "score": r.get("score", ""),
+        "score": (
+            f"{float(r.get('score')):.3f}"
+            if r.get("score") not in (None, "")
+            else ""
+        ),
         "confidence": r.get("confidence", ""),
         # similarity
         "nearest_active": r.get("nearest_active", ""),
@@ -399,7 +403,7 @@ def write_report(
     ]
     for r in ranked:
         lines.append(
-            f"| {r['rank']} | {r['score']:.2f} | {r['confidence']} | `{r['smiles']}` | {r['reason']} |"
+            f"| {r['rank']} | {r['score']:.3f} | {r['confidence']} | `{r['smiles']}` | {r['reason']} |"
         )
     lines += [
         "",
