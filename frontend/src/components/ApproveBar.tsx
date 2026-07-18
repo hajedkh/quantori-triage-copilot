@@ -136,20 +136,25 @@ export default function ApproveBar({
           {!exported ? (
             <>
               {!approving && (
-                <button className="btn primary" onClick={submitApprove} disabled={busy || approving}>
+                <button
+                  className="btn primary"
+                  onClick={submitApprove}
+                  disabled={busy || approving}
+                  title="Finalize shortlist and export CSV, SDF, and report artifacts"
+                >
                   <Check size={15} strokeWidth={2.5} /> Approve &amp; export
                 </button>
               )}
             </>
           ) : (
             <>
-              <button className="btn" onClick={() => onDownload("csv")}>
+              <button className="btn" onClick={() => onDownload("csv")} title="Download shortlist table as CSV">
                 <Download size={14} /> CSV
               </button>
-              <button className="btn" onClick={() => onDownload("sdf")}>
+              <button className="btn" onClick={() => onDownload("sdf")} title="Download structures as SDF with 3D conformers">
                 <Download size={14} /> SDF
               </button>
-              <button className="btn" onClick={() => onDownload("report")}>
+              <button className="btn" onClick={() => onDownload("report")} title="Download markdown report with rationale and citations">
                 <Download size={14} /> Report
               </button>
               <button className="btn" onClick={() => onDownload("traces")} title="Full tool-call trace, every agent, uncapped">
@@ -161,12 +166,13 @@ export default function ApproveBar({
 
         {!exported && !approving && (
           <div className="approve-ranking-row">
-            <label>
+            <label title="Select profile used to rescore the final shortlist before export">
               Ranking profile for final shortlist
               <select
                 value={rankingProfile}
                 onChange={(e) => void changeRankingProfile(e.target.value as RankingProfile)}
                 disabled={busy}
+                title="Re-score shortlist at the gate with a different ranking policy"
               >
                 <option value="balanced">Balanced (default)</option>
                 <option value="quality">Quality (similarity-focused)</option>
@@ -178,7 +184,11 @@ export default function ApproveBar({
               className="btn"
               onClick={() => setOpen(true)}
               disabled={!canDiversify || busy || approving}
-              title={canDiversify ? undefined : "Diversification rerun is available in live mode"}
+              title={
+                canDiversify
+                  ? "Generate new compounds and re-run filtering/ranking"
+                  : "Diversification rerun is available in live mode"
+              }
             >
               Diversify &amp; rerun
             </button>
@@ -191,9 +201,13 @@ export default function ApproveBar({
           <div className="div-modal">
             <h4>Diversify &amp; rerun settings</h4>
 
-            <label>
+            <label title="Profile used after diversification rerun">
               Ranking profile
-              <select value={rankingProfile} onChange={(e) => setRankingProfile(e.target.value as RankingProfile)}>
+              <select
+                value={rankingProfile}
+                onChange={(e) => setRankingProfile(e.target.value as RankingProfile)}
+                title="Profile used after diversification rerun"
+              >
                 <option value="balanced">Balanced (default)</option>
                 <option value="quality">Quality (similarity-focused)</option>
                 <option value="explore">Explore (novelty-friendly)</option>
@@ -201,9 +215,13 @@ export default function ApproveBar({
               </select>
             </label>
 
-            <label>
+            <label title="How shortlist diversity is selected before retriage">
               Method
-              <select value={mode} onChange={(e) => setMode(e.target.value as DiversityMode)}>
+              <select
+                value={mode}
+                onChange={(e) => setMode(e.target.value as DiversityMode)}
+                title="How shortlist diversity is selected before retriage"
+              >
                 <option value="scaffold">Scaffold (Bemis-Murcko)</option>
                 <option value="mmr">MMR</option>
                 <option value="cluster">Cluster (Butina)</option>
@@ -212,7 +230,7 @@ export default function ApproveBar({
             </label>
 
             {mode === "mmr" && (
-              <label>
+              <label title="MMR tradeoff: higher favors quality, lower favors novelty">
                 MMR lambda (0-1)
                 <input
                   type="number"
@@ -221,12 +239,13 @@ export default function ApproveBar({
                   step={0.05}
                   value={lam}
                   onChange={(e) => setLam(Number(e.target.value))}
+                  title="MMR tradeoff: higher favors quality, lower favors novelty"
                 />
               </label>
             )}
 
             {mode === "cluster" && (
-              <label>
+              <label title="Lower values create more clusters and increase diversity spread">
                 Cluster cutoff (distance)
                 <input
                   type="number"
@@ -235,11 +254,12 @@ export default function ApproveBar({
                   step={0.05}
                   value={cutoff}
                   onChange={(e) => setCutoff(Number(e.target.value))}
+                  title="Lower values create more clusters (more diversity)"
                 />
               </label>
             )}
 
-            <label>
+            <label title="Upper bound for generated candidates before retriage">
               Max new compounds
               <input
                 type="number"
@@ -248,12 +268,13 @@ export default function ApproveBar({
                 step={10}
                 value={maxGenerated}
                 onChange={(e) => setMaxGenerated(Math.max(1, Number(e.target.value) || 1))}
+                title="Upper bound for generated candidates before retriage"
               />
             </label>
 
             <div className="div-modal-actions">
-              <button className="btn" onClick={() => setOpen(false)} disabled={busy}>Cancel</button>
-              <button className="btn primary" onClick={submitDiversify} disabled={busy}>
+              <button className="btn" onClick={() => setOpen(false)} disabled={busy} title="Close without starting a rerun">Cancel</button>
+              <button className="btn primary" onClick={submitDiversify} disabled={busy} title="Start diversification then rerun screening and ranking">
                 {busy ? "Starting..." : "Run diversification"}
               </button>
             </div>
