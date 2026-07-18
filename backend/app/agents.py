@@ -121,6 +121,18 @@ _CRITIC_PROMPT_COMPACT = (
 )
 
 
+# One short, factual clause per profile — derived directly from the weight
+# deltas in chem.py::RANKING_PROFILES vs. DEFAULT_WEIGHTS, not invented.
+# Purely informational context for Cheminformatics' own threshold judgment;
+# chem.py itself is untouched — this never forces a specific threshold.
+_PROFILE_HINTS = {
+    "balanced": "a standard trade-off across similarity, active-coverage breadth, drug-likeness, and synthesizability",
+    "quality": "prioritizing strong similarity to known actives and multi-active coverage over synthesizability nuance",
+    "explore": "favoring breadth and diversity of hits, with more lenient drug-likeness/PAINS penalties",
+    "strict": "applying stricter drug-likeness and PAINS penalties for cleaner candidates",
+}
+
+
 def _is_small_model(cfg) -> bool:
     """Detect if the active LLM config points to a small local model
     that needs compact prompts."""
@@ -185,11 +197,15 @@ async def cheminformatics(run):
             "for each threshold choice, and any concerns about the survivor set."
         )
 
+    profile = getattr(run, "ranking_profile", "balanced")
+    profile_hint = _PROFILE_HINTS.get(profile, _PROFILE_HINTS["balanced"])
     user_msg = (
         f"Triage {len(run.candidates)} candidate molecules for target "
         f"{run.target_name} ({run.target_id or 'unresolved'}). "
         f"{len(run.known_actives)} known active binders are available for "
-        f"similarity scoring. Call screen_candidates now."
+        f"similarity scoring. The operator selected the '{profile}' ranking "
+        f"profile ({profile_hint}) for this run — weigh that when choosing "
+        f"filter thresholds. Call screen_candidates now."
     )
 
     async def executor(name, args):

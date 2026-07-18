@@ -43,10 +43,38 @@
   --r-sm: 7px;
   --gap: 20px;
   --maxw: 1360px;
+
+  /* One fixed dark palette app-wide (no light theme exists) — this hints
+     the browser's own native UI (default scrollbars, form controls, etc.)
+     to render dark instead of assuming light and clashing with it. */
+  color-scheme: dark;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* ---------- scrollbars — match the app palette everywhere, not OS default white ---------- */
+* {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: var(--line) var(--panel);
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: var(--panel);
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-faint);
+}
+*::-webkit-scrollbar-corner {
+  background: var(--panel);
 }
 
 html,
@@ -189,8 +217,8 @@ button {
 }
 
 .chat-dock .chat-list {
-  min-height: 190px;
-  max-height: 320px;
+  min-height: 220px;
+  max-height: 400px;
   padding: 18px 24px;
 }
 
@@ -216,7 +244,7 @@ button {
   right: 24px;
   bottom: 92px;
   width: 380px;
-  max-height: min(640px, calc(100vh - 132px));
+  max-height: min(720px, calc(100vh - 110px));
   z-index: 199;
   display: flex;
   flex-direction: column;
@@ -833,7 +861,7 @@ button {
 
 .setup-grid {
   display: grid;
-  grid-template-columns: 1fr 1.3fr auto;
+  grid-template-columns: 1fr 1.3fr 0.85fr auto;
   gap: 16px;
   align-items: end;
 }
@@ -1038,12 +1066,26 @@ button {
   border-radius: var(--r-sm);
   border: 1px solid transparent;
   background: var(--panel-2);
-  transition: border-color 0.2s ease, background 0.2s ease;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.1s ease;
+}
+.agent:hover {
+  border-color: var(--teal-dim);
+}
+.agent:hover .agent-expand-hint,
+.agent:focus-visible .agent-expand-hint {
+  opacity: 1;
+}
+.agent:active {
+  transform: scale(0.995);
 }
 
 .agent.running {
   border-color: var(--hit);
   background: var(--hit-bg);
+}
+.agent.running:hover {
+  border-color: var(--hit);
 }
 
 .agent.done {
@@ -1110,6 +1152,14 @@ button {
   color: var(--teal);
 }
 
+.agent-expand-hint {
+  flex: none;
+  align-self: center;
+  color: var(--fg-faint);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
 .div-feedback {
   margin-top: 10px;
   padding-top: 10px;
@@ -1117,12 +1167,34 @@ button {
 }
 
 .div-feedback-head {
+  display: flex;
+  align-items: center;
   font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--fg-faint);
   margin-bottom: 7px;
+}
+
+.div-feedback-live {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--hit);
+}
+.div-feedback-live::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--hit);
+  box-shadow: 0 0 0 2px var(--hit-bg);
+  animation: pulse 1.4s ease-in-out infinite;
 }
 
 .div-feedback-grid {
@@ -1222,6 +1294,215 @@ button {
 .tt-result.err {
   color: var(--low);
   margin-top: 2px;
+}
+
+/* ---------- agent trace modal — full, uncapped trace, click a card to open ---------- */
+.trace-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  background: rgba(6, 9, 14, 0.86);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  animation: trace-backdrop-in 0.16s ease both;
+}
+.trace-modal {
+  width: min(640px, 100%);
+  max-height: min(720px, 86vh);
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  overflow: hidden;
+  transform-origin: center;
+  animation: trace-modal-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes trace-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes trace-modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.trace-modal-h {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  flex: none;
+}
+.trace-modal-ico {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  color: var(--hit);
+}
+.trace-modal-copy {
+  min-width: 0;
+}
+.trace-modal-name {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 14.5px;
+}
+.trace-modal-role {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.trace-modal-status {
+  margin-left: auto;
+  flex: none;
+}
+.trace-modal-close {
+  flex: none;
+  background: none;
+  border: 0;
+  color: var(--fg-faint);
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+}
+.trace-modal-close:hover {
+  background: var(--panel-2);
+  color: var(--fg);
+}
+.trace-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.trace-modal-body .tt-row {
+  font-size: 12.5px;
+  line-height: 1.6;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.trace-modal-body .tt-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+/* ---------- 3D molecule viewer modal (Mol*, lazy-loaded) ---------- */
+.mol3d-modal {
+  width: min(560px, 100%);
+  height: min(560px, 82vh);
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  overflow: hidden;
+  transform-origin: center;
+  animation: trace-modal-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.mol3d-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b0f16;
+}
+.mol3d-canvas {
+  position: absolute;
+  inset: 0;
+}
+.mol3d-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.mol3d-spinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2.5px solid var(--line);
+  border-top-color: var(--hit);
+  animation: mol3d-spin 0.8s linear infinite;
+}
+@keyframes mol3d-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.mol3d-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 24px;
+}
+.mol3d-fallback-2d {
+  background: #fbfdff;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  width: 180px;
+  height: 170px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.mol3d-fallback-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--med);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-align: center;
+  max-width: 320px;
+}
+
+.mol3d-smiles {
+  font-family: var(--mono);
+}
+.mol3d-meta {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.mol3d-score {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg-dim);
 }
 
 /* ---------- funnel meter (the signature) ---------- */
@@ -1543,6 +1824,7 @@ button {
 }
 
 .mol-cell {
+  position: relative;
   border-radius: 6px;
   background: #fbfdff;
   border: 1px solid var(--line);
@@ -1551,6 +1833,42 @@ button {
   display: grid;
   place-items: center;
   overflow: hidden;
+}
+
+.mol3d-btn {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: rgba(15, 20, 30, 0.82);
+  color: var(--teal);
+  display: grid;
+  place-items: center;
+  /* No z-index: it's the last child inside .mol-cell/.prov-mol (both
+     `overflow: hidden`), so normal DOM-order stacking already paints it
+     above the 2D depiction underneath it. A z-index here previously
+     elevated it past its own container's stacking context entirely,
+     letting it render on top of unrelated later UI (the sticky approve
+     bar) wherever they visually overlapped while scrolling. */
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+.mol3d-btn:hover {
+  background: var(--hit);
+  color: #06120c;
+  transform: scale(1.08);
+}
+.mol3d-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.mol3d-btn:disabled:hover {
+  background: rgba(15, 20, 30, 0.82);
+  color: var(--teal);
+  transform: none;
 }
 
 .mol-cell canvas,
@@ -1650,6 +1968,7 @@ button {
 }
 
 .prov-mol {
+  position: relative;
   background: #fbfdff;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
@@ -1657,6 +1976,14 @@ button {
   display: grid;
   place-items: center;
   overflow: hidden;
+}
+
+.mol3d-btn-lg {
+  right: 6px;
+  bottom: 6px;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
 }
 
 .prov-facts {

@@ -60,14 +60,16 @@ export async function getLLMHealth(provider: LLMProvider): Promise<LLMHealthResu
   return res.json();
 }
 
-// POST /run  (multipart: target_name + candidates.csv) -> { run_id }
+// POST /run  (multipart: target_name + candidates.csv [+ ranking_profile]) -> { run_id }
 export async function startRun(
   targetName: string,
-  file: File
+  file: File,
+  rankingProfile?: RankingProfile
 ): Promise<StartResult> {
   const fd = new FormData();
   fd.append("target_name", targetName);
   fd.append("candidates", file);
+  if (rankingProfile) fd.append("ranking_profile", rankingProfile);
   const res = await fetch("/api/run", { method: "POST", body: fd });
   if (!res.ok) throw new Error(`start failed: ${res.status}`);
   const data = await res.json();
@@ -137,6 +139,25 @@ export async function diversifyRun(runId: string, req: DiversifyRequest): Promis
     body: JSON.stringify(req),
   });
   if (!res.ok) throw new Error(`diversify failed: ${res.status}`);
+}
+
+// GET /mol3d/{runId}/{rank} -> generated 3D conformer (MOL block) for the
+// on-demand Mol* viewer, or {ok:false} if this structure couldn't be
+// embedded. Never throws for a chemistry failure — only for a genuine
+// network/HTTP problem, which the caller treats the same as "unavailable".
+export interface Mol3DResult {
+  ok: boolean;
+  molblock?: string;
+}
+
+export async function getMol3D(runId: string, rank: number): Promise<Mol3DResult> {
+  try {
+    const res = await fetch(`/api/mol3d/${runId}/${rank}`);
+    if (!res.ok) return { ok: false };
+    return (await res.json()) as Mol3DResult;
+  } catch {
+    return { ok: false };
+  }
 }
 
 // Download URL for an exported artifact.

@@ -1,11 +1,14 @@
 import { useRef } from "react";
 import { FileText, Play, X } from "lucide-react";
+import type { RankingProfile } from "../types";
 
 interface Props {
   target: string;
   onTarget: (v: string) => void;
   file: File | null;
   onFile: (f: File | null) => void;
+  rankingProfile: RankingProfile;
+  onRankingProfile: (p: RankingProfile) => void;
   onRun: () => void;
   disabled: boolean;
   disabledReason?: string;
@@ -19,6 +22,8 @@ export default function SetupPanel({
   onTarget,
   file,
   onFile,
+  rankingProfile,
+  onRankingProfile,
   onRun,
   disabled,
   disabledReason,
@@ -83,6 +88,20 @@ export default function SetupPanel({
               onChange={(e) => onFile(e.target.files?.[0] ?? null)}
             />
           </div>
+        </div>
+
+        <div className="field">
+          <label htmlFor="ranking-profile">Ranking profile</label>
+          <select
+            id="ranking-profile"
+            value={rankingProfile}
+            onChange={(e) => onRankingProfile(e.target.value as RankingProfile)}
+          >
+            <option value="balanced">Balanced (default)</option>
+            <option value="quality">Quality (similarity-focused)</option>
+            <option value="explore">Explore (novelty-friendly)</option>
+            <option value="strict">Strict (drug-likeness penalties)</option>
+          </select>
         </div>
 
         <button
