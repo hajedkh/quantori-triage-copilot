@@ -21,6 +21,7 @@ import type {
   LLMHealth,
   DiversifyRequest,
   RankingProfile,
+  ChatMessage,
 } from "./types";
 
 const EMPTY: RunState = {
@@ -43,6 +44,11 @@ const EMPTY: RunState = {
 
 const TRACE_CAP = 8;
 
+interface AuditEvent {
+  ts: number;
+  event: StreamEvent;
+}
+
 export default function App() {
   const [mode, setMode] = useState<"mock" | "live">("live");
   const [target, setTarget] = useState("EGFR");
@@ -59,6 +65,9 @@ export default function App() {
   const unsubRef = useRef<(() => void) | null>(null);
   const [chatRunId, setChatRunId] = useState<string | null>(null);
   const [lastSteerAck, setLastSteerAck] = useState<{ message: string; ts: number } | null>(null);
+  const [chatAudit, setChatAudit] = useState<ChatMessage[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [dossierTokenCount, setDossierTokenCount] = useState(0);
 
   // The chat is present from the very first screen, so it needs a run_id
   // before any target/library/pipeline exists.
@@ -78,6 +87,12 @@ export default function App() {
 
   // Single event handler for both mock and live streams.
   const apply = useCallback((e: StreamEvent) => {
+    if (e.type === "dossier_token") {
+      setDossierTokenCount((n) => n + 1);
+    } else {
+      setAuditEvents((prev) => [...prev, { ts: Date.now(), event: e }]);
+    }
+
     setRun((s) => {
       const next = { ...s };
       switch (e.type) {
@@ -147,6 +162,9 @@ export default function App() {
   const start = useCallback(async () => {
     // reset
     if (unsubRef.current) unsubRef.current();
+    setAuditEvents([]);
+    setChatAudit([]);
+    setDossierTokenCount(0);
     setRun({
       ...EMPTY,
       status: "running",
@@ -192,8 +210,13 @@ export default function App() {
     if (mode === "live" && runIdRef.current) {
       try {
         await approveRun(runIdRef.current, rankingProfile);
-      } catch {
-        /* surfaced below via status */
+      } catch (err) {
+        setRun((s) => ({
+          ...s,
+          status: "error",
+          log: [...s.log, { ts: Date.now(), agent: "supervisor", msg: String(err) }],
+        }));
+        return;
       }
     }
     setRun((s) => ({ ...s, status: "exported" }));
@@ -231,16 +254,49 @@ export default function App() {
       // over SSE in both modes) — no backend round-trip either way, unlike
       // csv/sdf/report which are files the backend writes on approval.
       if (kind === "traces") {
+        const chronological_tools = auditEvents
+          .filter((x) => x.event.type === "tool_call")
+          .map((x) => ({
+            ts: x.ts,
+            type: x.event.type,
+            agent: x.event.agent ?? null,
+            payload: x.event.payload ?? null,
+          }));
+
         const payload = {
-          target: run.targetName,
+          schema_version: "audit-trail.v1",
           generated_at: new Date().toISOString(),
-          agents: run.fullTrace,
+          run: {
+            run_id: runIdRef.current,
+            chat_run_id: chatRunId,
+            mode,
+            status: run.status,
+            target_name: run.targetName,
+            target_id: run.targetId,
+            funnel: run.funnel,
+            metric: run.metric,
+            diversity: run.diversity,
+            llm_health: llmHealth,
+            last_steer_ack: lastSteerAck,
+          },
+          audit_summary: {
+            events_count: auditEvents.length,
+            tool_calls_count: chronological_tools.length,
+            chat_messages_count: chatAudit.length,
+            dossier_tokens_received: dossierTokenCount,
+          },
+          timeline: auditEvents,
+          tool_calls_chronological: chronological_tools,
+          chat_history: chatAudit,
+          pipeline_logs: run.log,
+          citations: run.citations,
+          tool_trace_by_agent: run.fullTrace,
         };
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${run.targetName || "target"}_traces.json`;
+        a.download = `${run.targetName || "target"}_audit_trail.json`;
         a.click();
         URL.revokeObjectURL(url);
         return;
@@ -262,7 +318,25 @@ export default function App() {
         alert(`${kind.toUpperCase()} export is produced by the backend in live mode.`);
       }
     },
-    [mode, run.ranked, run.targetName, run.fullTrace]
+    [
+      mode,
+      auditEvents,
+      chatAudit,
+      chatRunId,
+      dossierTokenCount,
+      lastSteerAck,
+      llmHealth,
+      run.citations,
+      run.diversity,
+      run.funnel,
+      run.fullTrace,
+      run.log,
+      run.metric,
+      run.ranked,
+      run.status,
+      run.targetId,
+      run.targetName,
+    ]
   );
 
   // Logo/title in the header — abandons the client-side view of the current
@@ -346,6 +420,7 @@ export default function App() {
           status={run.status}
           lastSteerAck={lastSteerAck}
           onCiteRank={onCiteRank}
+          onHistoryChange={setChatAudit}
           docked={!started}
         />
       </main>

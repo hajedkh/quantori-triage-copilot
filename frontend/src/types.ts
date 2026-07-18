@@ -147,6 +147,7 @@ export interface ChatPreview {
 }
 
 export interface ChatMessage {
+  ts: number;
   role: "user" | "assistant";
   content: string;
   toolCalls?: ChatToolCallDisplay[];

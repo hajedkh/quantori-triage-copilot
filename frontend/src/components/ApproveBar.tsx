@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { ShieldCheck, Download, Check, ListTree } from "lucide-react";
 import type { DiversityMode, DiversifyRequest, RankingProfile } from "../types";
+import BrandSpinner from "./BrandSpinner";
 
 interface Props {
   exported: boolean;
-  onApprove: (rankingProfile: RankingProfile) => void;
+  onApprove: (rankingProfile: RankingProfile) => Promise<void> | void;
   onDiversify: (req: DiversifyRequest) => Promise<void> | void;
   onRankingProfileChange: (rankingProfile: RankingProfile) => Promise<void> | void;
   canDiversify: boolean;
@@ -26,6 +27,7 @@ export default function ApproveBar({
   const [maxGenerated, setMaxGenerated] = useState(200);
   const [rankingProfile, setRankingProfile] = useState<RankingProfile>("balanced");
   const [busy, setBusy] = useState(false);
+  const [approving, setApproving] = useState(false);
 
   const submitDiversify = async () => {
     setBusy(true);
@@ -61,30 +63,54 @@ export default function ApproveBar({
     }
   };
 
+  const submitApprove = async () => {
+    if (approving) return;
+    setApproving(true);
+    try {
+      await onApprove(rankingProfile);
+    } finally {
+      setApproving(false);
+    }
+  };
+
   return (
     <>
-      <div className={"approve fadeup" + (exported ? " exported" : "")}>
-        <ShieldCheck size={22} color={exported ? "var(--teal)" : "var(--hit)"} />
+      <div className={"approve fadeup" + (exported ? " exported" : "") + (approving ? " approving" : "")}>
+        {approving ? (
+          <BrandSpinner size={22} label="creating downloads" />
+        ) : (
+          <ShieldCheck size={22} color={exported ? "var(--teal)" : "var(--hit)"} />
+        )}
         <div className="approve-txt">
-          <strong>{exported ? "Shortlist approved" : "Human sign-off required"}</strong>
+          <strong>
+            {approving
+              ? "Creating downloads"
+              : exported
+                ? "Shortlist approved"
+                : "Human sign-off required"}
+          </strong>
           <p>
-            {exported
-              ? "Exported with full provenance. Download below."
-              : "Review the ranked shortlist, then either approve to export or run one more diversification pass before re-filtering and re-ranking."}
+            {approving
+              ? "Preparing CSV, SDF, report, and audit trail files. This may take a moment."
+              : exported
+                ? "Exported with full provenance. Download below."
+                : "Review the ranked shortlist, then either approve to export or run one more diversification pass before re-filtering and re-ranking."}
           </p>
         </div>
 
         <div className="approve-actions">
           {!exported ? (
             <>
-              <button
-                className="btn"
-                onClick={() => setOpen(true)}
-                disabled={!canDiversify || busy}
-                title={canDiversify ? undefined : "Diversification rerun is available in live mode"}
-              >
-                Diversify &amp; rerun
-              </button>
+              {!approving && (
+                <button
+                  className="btn"
+                  onClick={() => setOpen(true)}
+                  disabled={!canDiversify || busy || approving}
+                  title={canDiversify ? undefined : "Diversification rerun is available in live mode"}
+                >
+                  Diversify &amp; rerun
+                </button>
+              )}
             </>
           ) : (
             <>
@@ -98,13 +124,13 @@ export default function ApproveBar({
                 <Download size={14} /> Report
               </button>
               <button className="btn" onClick={() => onDownload("traces")} title="Full tool-call trace, every agent, uncapped">
-                <ListTree size={14} /> Download traces
+                <ListTree size={14} /> Audit Trail
               </button>
             </>
           )}
         </div>
 
-        {!exported && (
+        {!exported && !approving && (
           <div className="approve-ranking-row">
             <label>
               Ranking profile for final shortlist
@@ -119,7 +145,7 @@ export default function ApproveBar({
                 <option value="strict">Strict (drug-likeness penalties)</option>
               </select>
             </label>
-            <button className="btn primary" onClick={() => onApprove(rankingProfile)} disabled={busy}>
+            <button className="btn primary" onClick={submitApprove} disabled={busy || approving}>
               <Check size={15} strokeWidth={2.5} /> Approve &amp; export
             </button>
           </div>

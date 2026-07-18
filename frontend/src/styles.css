@@ -1714,6 +1714,10 @@ button {
   border-color: var(--teal);
 }
 
+.approve.approving {
+  border-color: var(--teal);
+}
+
 .approve-txt strong {
   font-family: var(--display);
   font-weight: 600;

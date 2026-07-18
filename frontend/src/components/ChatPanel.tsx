@@ -9,6 +9,7 @@ interface Props {
   status: RunStatus; // reused from RunState — "idle" doubles as "setup" here
   lastSteerAck: { message: string; ts: number } | null;
   onCiteRank: (rank: number) => void;
+  onHistoryChange?: (messages: ChatMessage[]) => void;
   // true on the setup screen: renders inline below the form instead of
   // floating. Same mounted component either way — the conversation carries
   // over when a run starts and it switches to floating.
@@ -120,9 +121,18 @@ function PreviewCard({ preview, onApply, onCancel }: { preview: ChatPreview; onA
   );
 }
 
-export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, docked }: Props) {
+export default function ChatPanel({
+  runId,
+  status,
+  lastSteerAck,
+  onCiteRank,
+  onHistoryChange,
+  docked,
+}: Props) {
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([{ role: "assistant", content: GREETING }]);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    { ts: Date.now(), role: "assistant", content: GREETING },
+  ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [pendingSteer, setPendingSteer] = useState<{ text: string; acked: boolean } | null>(null);
@@ -136,6 +146,10 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, open]);
+
+  useEffect(() => {
+    if (onHistoryChange) onHistoryChange(messages);
+  }, [messages, onHistoryChange]);
 
   // The moment the run starts, the docked card morphs into the floating
   // widget — keep it visibly open through that transition instead of
@@ -157,8 +171,15 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
   const runChatTurn = async (text: string) => {
     if (!runId) return;
     setSending(true);
-    const assistant: ChatMessage = { role: "assistant", content: "", toolCalls: [], streaming: true };
-    setMessages((m) => [...m, { role: "user", content: text }, assistant]);
+    const now = Date.now();
+    const assistant: ChatMessage = {
+      ts: now,
+      role: "assistant",
+      content: "",
+      toolCalls: [],
+      streaming: true,
+    };
+    setMessages((m) => [...m, { ts: now, role: "user", content: text }, assistant]);
 
     const onEvent = (e: ChatEvent) => {
       if (e.type === "tool_call" && e.payload?.tool) {
@@ -206,7 +227,10 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
     try {
       await askChat(runId, text, onEvent);
     } catch (err) {
-      setMessages((m) => [...m, { role: "assistant", content: `Chat request failed: ${String(err)}` }]);
+      setMessages((m) => [
+        ...m,
+        { ts: Date.now(), role: "assistant", content: `Chat request failed: ${String(err)}` },
+      ]);
     } finally {
       setSending(false);
       inFlightRef.current = false;
@@ -216,16 +240,24 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
   const runSteerTurn = async (text: string) => {
     if (!runId) return;
     setSending(true);
+    const now = Date.now();
     setMessages((m) => [
       ...m,
-      { role: "user", content: text },
-      { role: "assistant", content: "queued — reaches the agent at its next decision point" },
+      { ts: now, role: "user", content: text },
+      {
+        ts: now,
+        role: "assistant",
+        content: "queued — reaches the agent at its next decision point",
+      },
     ]);
     setPendingSteer({ text, acked: false });
     try {
       await steer(runId, text);
     } catch (err) {
-      setMessages((m) => [...m, { role: "assistant", content: `Couldn't queue that: ${String(err)}` }]);
+      setMessages((m) => [
+        ...m,
+        { ts: Date.now(), role: "assistant", content: `Couldn't queue that: ${String(err)}` },
+      ]);
       setPendingSteer(null);
     } finally {
       setSending(false);
