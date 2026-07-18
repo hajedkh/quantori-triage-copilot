@@ -1,8 +1,13 @@
 """LangGraph wiring.
 
-Linear graph, one interrupt at the human gate:
+Primary graph path with one interrupt at the human gate:
 
     supervisor → knowledge → cheminformatics → critic → human_gate → export
+
+At the gate, the operator can either approve+export or request another
+iteration pass:
+
+    diversifier → cheminformatics → critic → human_gate
 
 Each agent from agents.py is a node. The human_gate node calls interrupt() to
 pause the graph and wait for approval (see resume() below for how approval
@@ -101,8 +106,7 @@ def build_graph():
     g.add_edge("supervisor", "knowledge")
     g.add_edge("knowledge", "cheminformatics")
     g.add_edge("cheminformatics", "critic")
-    g.add_edge("critic", "diversifier")
-    g.add_edge("diversifier", "human_gate")
+    g.add_edge("critic", "human_gate")
     g.add_edge("human_gate", "export")
     g.add_edge("export", END)
 
@@ -177,3 +181,108 @@ async def resume(run_id: str):
         logger.exception("export failed for run %s", run_id)
         raise
     run.status = "exported"
+
+
+async def diversify_and_retriage(run_id: str, opts: dict | None = None):
+    """Run one operator-requested iteration:
+    diversifier -> cheminformatics -> critic -> human gate.
+
+    Mirrors the post-critic branch requested at the human gate without relying
+    on langgraph resume (same Python 3.9 contextvar limitation as resume()).
+    """
+    run = RUNS[run_id]
+    run.status = "running"
+    if opts:
+        run.diversify_mode = opts.get("mode", run.diversify_mode)
+        run.diversify_lambda = opts.get("lam", run.diversify_lambda)
+        run.diversify_cluster_cutoff = opts.get("cutoff", run.diversify_cluster_cutoff)
+        run.diversify_max_generated = opts.get(
+            "max_generated", run.diversify_max_generated
+        )
+    emit(
+        run,
+        {
+            "type": "log",
+            "agent": "supervisor",
+            "payload": "Operator requested diversification pass — rerunning cheminformatics and critic.",
+        },
+    )
+
+    try:
+        await agents.diversifier(run)
+
+        new_candidates = list(getattr(run, "diversified_candidates", []) or [])
+        if not new_candidates:
+            emit(
+                run,
+                {
+                    "type": "log",
+                    "agent": "supervisor",
+                    "payload": "Diversifier produced no new compounds; keeping current shortlist.",
+                },
+            )
+            return
+
+        base_survivors = list(run.survivors)
+        base_stats = dict(run.screen_stats or {})
+        base_candidates = list(run.candidates)
+
+        # Important: this rerun screens only newly generated compounds.
+        run.candidates = new_candidates
+        await agents.cheminformatics(run)
+
+        new_survivors = list(run.survivors)
+        old_by_smiles = {s.get("smiles"): s for s in base_survivors}
+        added_survivors = [
+            s for s in new_survivors if s.get("smiles") not in old_by_smiles
+        ]
+        merged_survivors = base_survivors + added_survivors
+        run.survivors = merged_survivors
+        run.candidates = base_candidates
+
+        new_stats = dict(run.screen_stats or {})
+        merged_stats = {
+            "input": base_stats.get("input", 0) + len(new_candidates),
+            "invalid": base_stats.get("invalid", 0) + new_stats.get("invalid", 0),
+            "lipinski_dropped": base_stats.get("lipinski_dropped", 0)
+            + new_stats.get("lipinski_dropped", 0),
+            "pains_dropped": base_stats.get("pains_dropped", 0)
+            + new_stats.get("pains_dropped", 0),
+            "qed_errors": base_stats.get("qed_errors", 0)
+            + new_stats.get("qed_errors", 0),
+            "after_lipinski": base_stats.get("after_lipinski", 0)
+            + new_stats.get("after_lipinski", 0),
+            "survivors": len(merged_survivors),
+            "diversified_added": len(new_candidates),
+            "diversified_survivors_added": len(added_survivors),
+        }
+        run.screen_stats = merged_stats
+
+        emit(
+            run,
+            {
+                "type": "funnel",
+                "payload": {
+                    "input": merged_stats["input"],
+                    "filtered": merged_stats["survivors"],
+                    "ranked": None,
+                    "diversified_added": merged_stats["diversified_added"],
+                },
+            },
+        )
+
+        await agents.critic(run)
+    except Exception as e:
+        logger.exception("run %s diversification pass failed", run_id)
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "supervisor",
+                "payload": f"Error: {type(e).__name__}: {e}",
+            },
+        )
+    finally:
+        run.status = "awaiting_approval"
+        emit(run, {"type": "awaiting_approval"})
+        run.queue.put_nowait(None)

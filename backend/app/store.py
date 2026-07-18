@@ -29,7 +29,15 @@ class Run:
     metric: dict | None = None
     diversify_mode: str = "scaffold"  # off | scaffold | mmr | cluster (operator choice)
     diversify_lambda: float = 0.7  # MMR quality/spread trade-off (1=quality, 0=spread)
+    diversify_cluster_cutoff: float = 0.35  # Butina distance cutoff when mode=cluster
+    diversify_max_generated: int = 200  # cap on newly generated compounds per rerun
     diversity_stats: dict | None = None  # result of the Diversifier agent's pass
+    diversified_candidates: list = field(
+        default_factory=list
+    )  # newly generated candidates
+    diversified_seed_count: int = (
+        0  # how many seed molecules were used to generate new compounds
+    )
     provenance: dict | None = None  # {timestamp, model, provider} captured at run start
     screen_stats: dict | None = (
         None  # stats dict from the last screen_candidates tool call

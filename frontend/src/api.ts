@@ -3,7 +3,7 @@
 // so App.tsx handles both modes with one reducer.
 
 import type { StreamEvent } from "./mock";
-import type { LLMOptions, LLMProvider } from "./types";
+import type { LLMOptions, LLMProvider, DiversifyRequest } from "./types";
 
 export interface StartResult {
   runId: string;
@@ -54,16 +54,14 @@ export async function getLLMHealth(provider: LLMProvider): Promise<LLMHealthResu
   return res.json();
 }
 
-// POST /run  (multipart: target_name + candidates.csv + diversify) -> { run_id }
+// POST /run  (multipart: target_name + candidates.csv) -> { run_id }
 export async function startRun(
   targetName: string,
-  file: File,
-  diversify: string = "scaffold"
+  file: File
 ): Promise<StartResult> {
   const fd = new FormData();
   fd.append("target_name", targetName);
   fd.append("candidates", file);
-  fd.append("diversify", diversify);
   const res = await fetch("/api/run", { method: "POST", body: fd });
   if (!res.ok) throw new Error(`start failed: ${res.status}`);
   const data = await res.json();
@@ -97,6 +95,17 @@ export function subscribe(
 export async function approveRun(runId: string): Promise<void> {
   const res = await fetch(`/api/approve/${runId}`, { method: "POST" });
   if (!res.ok) throw new Error(`approve failed: ${res.status}`);
+}
+
+// POST /diversify/{runId} -> run one more loop:
+// diversifier -> cheminformatics -> critic -> approval gate.
+export async function diversifyRun(runId: string, req: DiversifyRequest): Promise<void> {
+  const res = await fetch(`/api/diversify/${runId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error(`diversify failed: ${res.status}`);
 }
 
 // Download URL for an exported artifact.

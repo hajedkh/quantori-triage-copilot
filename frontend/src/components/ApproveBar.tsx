@@ -1,46 +1,152 @@
+import { useState } from "react";
 import { ShieldCheck, Download, Check, ListTree } from "lucide-react";
+import type { DiversityMode, DiversifyRequest } from "../types";
 
 interface Props {
   exported: boolean;
   onApprove: () => void;
+  onDiversify: (req: DiversifyRequest) => Promise<void> | void;
+  canDiversify: boolean;
   onDownload: (kind: "csv" | "sdf" | "report" | "traces") => void;
 }
 
-export default function ApproveBar({ exported, onApprove, onDownload }: Props) {
+export default function ApproveBar({ exported, onApprove, onDiversify, canDiversify, onDownload }: Props) {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<DiversityMode>("scaffold");
+  const [lam, setLam] = useState(0.7);
+  const [cutoff, setCutoff] = useState(0.35);
+  const [maxGenerated, setMaxGenerated] = useState(200);
+  const [busy, setBusy] = useState(false);
+
+  const submitDiversify = async () => {
+    setBusy(true);
+    try {
+      const req: DiversifyRequest = {
+        mode,
+        maxGenerated,
+      };
+      if (mode === "mmr") req.lam = lam;
+      if (mode === "cluster") req.cutoff = cutoff;
+      await onDiversify(req);
+      setOpen(false);
+    } catch (err) {
+      alert(`Couldn't start diversification rerun: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <div className={"approve fadeup" + (exported ? " exported" : "")}>
-      <ShieldCheck size={22} color={exported ? "var(--teal)" : "var(--hit)"} />
-      <div className="approve-txt">
-        <strong>{exported ? "Shortlist approved" : "Human sign-off required"}</strong>
-        <p>
-          {exported
-            ? "Exported with full provenance. Download below."
-            : "Review the ranked shortlist, then approve to export. Nothing leaves without your sign-off."}
-        </p>
+    <>
+      <div className={"approve fadeup" + (exported ? " exported" : "")}>
+        <ShieldCheck size={22} color={exported ? "var(--teal)" : "var(--hit)"} />
+        <div className="approve-txt">
+          <strong>{exported ? "Shortlist approved" : "Human sign-off required"}</strong>
+          <p>
+            {exported
+              ? "Exported with full provenance. Download below."
+              : "Review the ranked shortlist, then either approve to export or run one more diversification pass before re-filtering and re-ranking."}
+          </p>
+        </div>
+
+        <div className="approve-actions">
+          {!exported ? (
+            <>
+              <button
+                className="btn"
+                onClick={() => setOpen(true)}
+                disabled={!canDiversify || busy}
+                title={canDiversify ? undefined : "Diversification rerun is available in live mode"}
+              >
+                Diversify &amp; rerun
+              </button>
+              <button className="btn primary" onClick={onApprove}>
+                <Check size={15} strokeWidth={2.5} /> Approve &amp; export
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn" onClick={() => onDownload("csv")}>
+                <Download size={14} /> CSV
+              </button>
+              <button className="btn" onClick={() => onDownload("sdf")}>
+                <Download size={14} /> SDF
+              </button>
+              <button className="btn" onClick={() => onDownload("report")}>
+                <Download size={14} /> Report
+              </button>
+              <button className="btn" onClick={() => onDownload("traces")} title="Full tool-call trace, every agent, uncapped">
+                <ListTree size={14} /> Download traces
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
-      <div className="approve-actions">
-        {!exported ? (
-          <button className="btn primary" onClick={onApprove}>
-            <Check size={15} strokeWidth={2.5} /> Approve &amp; export
-          </button>
-        ) : (
-          <>
-            <button className="btn" onClick={() => onDownload("csv")}>
-              <Download size={14} /> CSV
-            </button>
-            <button className="btn" onClick={() => onDownload("sdf")}>
-              <Download size={14} /> SDF
-            </button>
-            <button className="btn" onClick={() => onDownload("report")}>
-              <Download size={14} /> Report
-            </button>
-            <button className="btn" onClick={() => onDownload("traces")} title="Full tool-call trace, every agent, uncapped">
-              <ListTree size={14} /> Download traces
-            </button>
-          </>
-        )}
-      </div>
-    </div>
+      {open && (
+        <div className="div-modal-wrap" role="dialog" aria-modal="true" aria-label="Diversify and rerun settings">
+          <div className="div-modal">
+            <h4>Diversify &amp; rerun settings</h4>
+
+            <label>
+              Method
+              <select value={mode} onChange={(e) => setMode(e.target.value as DiversityMode)}>
+                <option value="scaffold">Scaffold (Bemis-Murcko)</option>
+                <option value="mmr">MMR</option>
+                <option value="cluster">Cluster (Butina)</option>
+                <option value="off">Off (generate from top-scored seeds)</option>
+              </select>
+            </label>
+
+            {mode === "mmr" && (
+              <label>
+                MMR lambda (0-1)
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={lam}
+                  onChange={(e) => setLam(Number(e.target.value))}
+                />
+              </label>
+            )}
+
+            {mode === "cluster" && (
+              <label>
+                Cluster cutoff (distance)
+                <input
+                  type="number"
+                  min={0.1}
+                  max={0.9}
+                  step={0.05}
+                  value={cutoff}
+                  onChange={(e) => setCutoff(Number(e.target.value))}
+                />
+              </label>
+            )}
+
+            <label>
+              Max new compounds
+              <input
+                type="number"
+                min={1}
+                max={5000}
+                step={1}
+                value={maxGenerated}
+                onChange={(e) => setMaxGenerated(Math.max(1, Number(e.target.value) || 1))}
+              />
+            </label>
+
+            <div className="div-modal-actions">
+              <button className="btn" onClick={() => setOpen(false)} disabled={busy}>Cancel</button>
+              <button className="btn primary" onClick={submitDiversify} disabled={busy}>
+                {busy ? "Starting..." : "Run diversification"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

@@ -15,6 +15,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Descriptors, AllChem, DataStructs, QED
+from rdkit.Chem import BRICS
 from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
@@ -317,6 +318,7 @@ def screen(
             {
                 "smiles": Chem.MolToSmiles(mol),
                 "label": c.get("label"),
+                "is_diversified_generated": bool(c.get("is_diversified_generated")),
                 **d,
                 "qed": qed,
                 "qed_error": qed_error,
@@ -346,6 +348,90 @@ def screen(
         "survivors": len(survivors),
     }
     return survivors, stats
+
+
+def generate_diversified_candidates(
+    ranked_rows: list[dict],
+    mode: str = "scaffold",
+    lam: float = 0.7,
+    cutoff: float = 0.35,
+    max_seeds: int = 14,
+    max_fragments: int = 40,
+    max_generated: int = 200,
+) -> tuple[list[dict], dict]:
+    """Generate diversification compounds from ranked seeds via BRICS recombination.
+
+    The input is the existing ranked shortlist. We select diverse seeds, collect
+    BRICS fragments, then recombine fragments into new candidates.
+    """
+    if not ranked_rows:
+        return [], {"seed_count": 0, "fragments": 0, "generated": 0}
+
+    # Seed choice mirrors the operator-selected diversity mode.
+    seeds, _ = diversify(
+        ranked_rows, mode=mode, lam=lam, top_n=max_seeds, cutoff=cutoff
+    )
+    seed_smiles = [r["smiles"] for r in seeds]
+    seed_set = set(seed_smiles)
+
+    fragments: list = []
+    seen_fragments: set[str] = set()
+    for smi in seed_smiles:
+        mol = parse(smi)
+        if mol is None:
+            continue
+        try:
+            frag_smis = BRICS.BRICSDecompose(mol)
+        except Exception:
+            continue
+        for frag_smi in frag_smis:
+            frag_mol = Chem.MolFromSmiles(frag_smi)
+            if frag_mol is None:
+                continue
+            canonical_frag = Chem.MolToSmiles(frag_mol)
+            if canonical_frag in seen_fragments:
+                continue
+            seen_fragments.add(canonical_frag)
+            fragments.append(frag_mol)
+            if len(fragments) >= max_fragments:
+                break
+        if len(fragments) >= max_fragments:
+            break
+
+    if len(fragments) < 2:
+        return [], {
+            "seed_count": len(seed_smiles),
+            "fragments": len(fragments),
+            "generated": 0,
+        }
+
+    generated: list[dict] = []
+    seen: set[str] = set(seed_set)
+    try:
+        for mol in BRICS.BRICSBuild(fragments, maxDepth=2):
+            smi = canonical(Chem.MolToSmiles(mol))
+            if not smi or smi in seen:
+                continue
+            seen.add(smi)
+            generated.append(
+                {
+                    "smiles": smi,
+                    "label": None,
+                    "is_diversified_generated": True,
+                }
+            )
+            if len(generated) >= max_generated:
+                break
+    except Exception:
+        # If BRICS enumeration fails for this seed/fragment mix, return what we
+        # already produced instead of failing the rerun path.
+        pass
+
+    return generated, {
+        "seed_count": len(seed_smiles),
+        "fragments": len(fragments),
+        "generated": len(generated),
+    }
 
 
 # ---------------------------------------------------------------- parallel --
@@ -401,6 +487,7 @@ def _process_one(work_item: tuple[dict, dict]) -> dict:
         "status": "survivor",
         "smiles": Chem.MolToSmiles(mol),
         "label": candidate.get("label"),
+        "is_diversified_generated": bool(candidate.get("is_diversified_generated")),
         **d,
         "qed": qed_val,
         "qed_error": qed_error,

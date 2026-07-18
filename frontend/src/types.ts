@@ -19,6 +19,7 @@ export interface FunnelState {
   input: number;
   filtered: number | null;
   ranked: number | null;
+  diversified_added?: number | null;
 }
 
 export interface RankedMol {
@@ -55,6 +56,15 @@ export interface DiversityStats {
   n_selected: number;
   n_scaffolds: number | null;
   n_clusters: number | null;
+  n_generated?: number;
+  seed_count?: number;
+}
+
+export interface DiversifyRequest {
+  mode: DiversityMode;
+  lam?: number;
+  cutoff?: number;
+  maxGenerated: number;
 }
 
 // Citation-grounding report from the Knowledge agent's dossier build.

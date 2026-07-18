@@ -1,6 +1,5 @@
 import { useRef } from "react";
 import { FileText, Play, X } from "lucide-react";
-import type { DiversityMode } from "../types";
 
 interface Props {
   target: string;
@@ -11,16 +10,7 @@ interface Props {
   disabled: boolean;
   disabledReason?: string;
   mode: "mock" | "live";
-  diversify: DiversityMode;
-  onDiversify: (m: DiversityMode) => void;
 }
-
-const DIVERSITY_OPTIONS: { value: DiversityMode; label: string }[] = [
-  { value: "scaffold", label: "Scaffold (Bemis-Murcko)" },
-  { value: "mmr", label: "MMR (balance spread)" },
-  { value: "cluster", label: "Cluster (Butina)" },
-  { value: "off", label: "Off (pure score)" },
-];
 
 const EXAMPLES = ["EGFR", "BRAF", "ABL1"];
 
@@ -33,8 +23,6 @@ export default function SetupPanel({
   disabled,
   disabledReason,
   mode,
-  diversify,
-  onDiversify,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -95,22 +83,6 @@ export default function SetupPanel({
               onChange={(e) => onFile(e.target.files?.[0] ?? null)}
             />
           </div>
-        </div>
-
-        <div className="field">
-          <label htmlFor="diversify">Shortlist diversity</label>
-          <select
-            id="diversify"
-            value={diversify}
-            onChange={(e) => onDiversify(e.target.value as DiversityMode)}
-            title="How the Diversifier agent spreads the ranked shortlist across chemotypes"
-          >
-            {DIVERSITY_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
         </div>
 
         <button

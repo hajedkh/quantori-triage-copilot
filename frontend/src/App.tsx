@@ -6,14 +6,14 @@ import OutputTabs from "./components/OutputTabs";
 import ApproveBar from "./components/ApproveBar";
 import ChatPanel from "./components/ChatPanel";
 import { runMockStream, buildCsv, type StreamEvent } from "./mock";
-import { startRun, subscribe, approveRun, downloadUrl, createSession } from "./api";
-import type { AgentId, RunState, LLMHealth, DiversityMode } from "./types";
+import { startRun, subscribe, approveRun, diversifyRun, downloadUrl, createSession } from "./api";
+import type { AgentId, RunState, LLMHealth, DiversifyRequest } from "./types";
 
 const EMPTY: RunState = {
   status: "idle",
   agents: { supervisor: "idle", knowledge: "idle", cheminformatics: "idle", critic: "idle", diversifier: "idle" },
   activeAgent: null,
-  funnel: { input: 0, filtered: null, ranked: null },
+  funnel: { input: 0, filtered: null, ranked: null, diversified_added: 0 },
   dossier: "",
   citations: [],
   ranked: [],
@@ -33,7 +33,6 @@ export default function App() {
   const [mode, setMode] = useState<"mock" | "live">("live");
   const [target, setTarget] = useState("EGFR");
   const [file, setFile] = useState<File | null>(null);
-  const [diversify, setDiversify] = useState<DiversityMode>("scaffold");
   const [tab, setTab] = useState<"dossier" | "shortlist">("dossier");
   const [run, setRun] = useState<RunState>(EMPTY);
   const [llmHealth, setLlmHealth] = useState<LLMHealth>({
@@ -134,7 +133,12 @@ export default function App() {
   const start = useCallback(async () => {
     // reset
     if (unsubRef.current) unsubRef.current();
-    setRun({ ...EMPTY, status: "running", targetName: target, funnel: { input: 0, filtered: null, ranked: null } });
+    setRun({
+      ...EMPTY,
+      status: "running",
+      targetName: target,
+      funnel: { input: 0, filtered: null, ranked: null, diversified_added: 0 },
+    });
     setTab("dossier");
 
     if (mode === "mock") {
@@ -142,7 +146,7 @@ export default function App() {
     } else {
       try {
         if (!file) throw new Error("Select a candidate CSV for live mode.");
-        const { runId } = await startRun(target, file, diversify);
+        const { runId } = await startRun(target, file);
         runIdRef.current = runId;
         unsubRef.current = subscribe(runId, apply);
         // Point the chat at whichever run is actually live, regardless of
@@ -156,7 +160,7 @@ export default function App() {
         }));
       }
     }
-  }, [mode, target, file, diversify, apply]);
+  }, [mode, target, file, apply]);
 
   const onCiteRank = useCallback((rank: number) => {
     setTab("shortlist");
@@ -180,6 +184,22 @@ export default function App() {
     }
     setRun((s) => ({ ...s, status: "exported" }));
   }, [mode]);
+
+  const runDiversifyLoop = useCallback(async (req: DiversifyRequest) => {
+    if (mode !== "live" || !runIdRef.current) return;
+    if (unsubRef.current) unsubRef.current();
+    setRun((s) => ({ ...s, status: "running" }));
+    try {
+      await diversifyRun(runIdRef.current, req);
+      unsubRef.current = subscribe(runIdRef.current, apply);
+    } catch (err) {
+      setRun((s) => ({
+        ...s,
+        status: "error",
+        log: [...s.log, { ts: Date.now(), agent: "supervisor", msg: String(err) }],
+      }));
+    }
+  }, [mode, apply]);
 
   const download = useCallback(
     (kind: "csv" | "sdf" | "report" | "traces") => {
@@ -256,8 +276,6 @@ export default function App() {
             disabled={run.status === "running" || llmBlocked}
             disabledReason={runDisabledReason}
             mode={mode}
-            diversify={diversify}
-            onDiversify={setDiversify}
           />
         )}
 
@@ -288,6 +306,8 @@ export default function App() {
               <ApproveBar
                 exported={run.status === "exported"}
                 onApprove={approve}
+                onDiversify={runDiversifyLoop}
+                canDiversify={mode === "live"}
                 onDownload={download}
               />
             )}

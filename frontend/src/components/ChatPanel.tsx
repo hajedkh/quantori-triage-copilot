@@ -23,14 +23,15 @@ const GREETING =
 function chipsFor(status: RunStatus): string[] {
   if (status === "idle") return ["How do I start a run?", "What does the diversity setting do?"];
   if (status === "running")
-    return ["What has it done so far?", "How many survivors?", "What thresholds did it use?", "How many did PAINS drop?"];
+    return ["What has the workflow done so far?", "How many compounds survived the filter?", "What thresholds were used?", "How many compounds did the PAINS filter remove?"];
   if (status === "awaiting_approval")
     return [
-      "Why did #1 rank first?",
-      "Which scaffolds dominate the top 20?",
-      "Diversify across scaffolds",
+      "Why did compound #1 rank first?",
+      "Should we diversify and rerun?",
+      "Which scaffolds are most prevalent in the top 20 compounds?",
+      "What is the diversify across scaffolds",
       "How many known actives did we recover?",
-      "Show me neighbours of #3",
+      "Show me compounds similar to #3 and #5 that are present in the top 250 compounds.",
     ];
   return [];
 }

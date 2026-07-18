@@ -341,13 +341,15 @@ def tools_for_status(status: str) -> list:
 
 def _get_run_status(run) -> dict:
     agents_done = [e.get("agent") for e in run.events if e.get("type") == "agent_done"]
+    st = run.screen_stats or {}
     return {
         "status": run.status,
         "target": run.target_name,
         "funnel": {
-            "input": len(run.candidates),
+            "input": st.get("input", len(run.candidates)),
             "survivors": len(run.survivors),
             "ranked": len(run.ranked),
+            "diversified_added": st.get("diversified_added", 0),
         },
         "agents_done": agents_done,
     }
@@ -413,11 +415,13 @@ def _get_funnel_breakdown(run) -> dict:
     return {
         "available": True,
         "input": st.get("input"),
+        "diversified_added": st.get("diversified_added", 0),
         "invalid_smiles": st.get("invalid", 0),
         "lipinski_dropped": st.get("lipinski_dropped", 0),
         "pains_dropped": st.get("pains_dropped", 0),
         "qed_errors": st.get("qed_errors", 0),
         "survivors": st.get("survivors"),
+        "diversified_survivors_added": st.get("diversified_survivors_added", 0),
     }
 
 
@@ -592,6 +596,9 @@ def _score_survivors(
                 "max_similarity": sim,
                 "scaffold": s.get("scaffold", ""),
                 "sa_score": s.get("sa_score"),
+                "is_diversified_generated": bool(
+                    s.get("is_diversified_generated", False)
+                ),
                 "is_known_active": (
                     bool(s.get("label")) if s.get("label") is not None else False
                 ),
@@ -607,7 +614,7 @@ def _score_survivors(
 
 def _apply_ranked(run, new_ranked: list) -> None:
     run.ranked = new_ranked
-    n_in = len(run.candidates)
+    n_in = (run.screen_stats or {}).get("input", len(run.candidates))
     emit(
         run,
         {
@@ -616,6 +623,9 @@ def _apply_ranked(run, new_ranked: list) -> None:
                 "input": n_in,
                 "filtered": len(run.survivors),
                 "ranked": len(new_ranked),
+                "diversified_added": (run.screen_stats or {}).get(
+                    "diversified_added", 0
+                ),
             },
         },
     )

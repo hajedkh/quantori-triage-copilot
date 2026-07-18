@@ -978,16 +978,20 @@ button {
   display: grid;
   grid-template-columns: 340px 1fr;
   gap: var(--gap);
-  align-items: start;
+  align-items: stretch;
+  height: calc(100vh - 132px);
+  min-height: 0;
 }
 
 /* ---------- pipeline rail (left) ---------- */
 .rail {
-  position: sticky;
-  top: 20px;
+  position: static;
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .panel {
@@ -1321,6 +1325,9 @@ button {
   flex-direction: column;
   gap: 14px;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .tabs {
@@ -1724,6 +1731,62 @@ button {
   gap: 10px;
 }
 
+.div-modal-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.div-modal {
+  width: min(460px, calc(100vw - 28px));
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border-radius: var(--r);
+  padding: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  display: grid;
+  gap: 10px;
+}
+
+.div-modal h4 {
+  margin: 0 0 2px;
+  font-family: var(--display);
+  font-size: 16px;
+}
+
+.div-modal label {
+  display: grid;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.div-modal input,
+.div-modal select {
+  border: 1px solid var(--line);
+  background: var(--raise);
+  color: var(--fg);
+  border-radius: var(--r-sm);
+  padding: 10px 11px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.div-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .btn {
   border: 1px solid var(--line);
   background: var(--raise);
@@ -1801,10 +1864,18 @@ button {
 @media (max-width: 940px) {
   .work {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .rail {
     position: static;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .outputs {
+    overflow: visible;
+    padding-right: 0;
   }
 
   .setup-grid {

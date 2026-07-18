@@ -66,6 +66,7 @@ _CSV_COLUMNS = [
     "inchikey",
     # --- Provenance ---
     "is_known_active",
+    "is_diversified_generated",
     "reason",
     "evidence_used",
 ]
@@ -130,6 +131,7 @@ def _enrich_row(r: dict) -> dict:
         "inchikey": ext["inchikey"],
         # provenance
         "is_known_active": r.get("is_known_active", ""),
+        "is_diversified_generated": r.get("is_diversified_generated", False),
         "reason": r.get("reason", ""),
         "evidence_used": (
             "; ".join(r.get("evidence_used", [])) if r.get("evidence_used") else ""
@@ -283,6 +285,10 @@ def write_sdf(
         out_mol.SetProp("score", f'{r["score"]:.3f}')
         out_mol.SetProp("confidence", r.get("confidence", ""))
         out_mol.SetProp("nearest_active", str(r.get("nearest_active", "")))
+        out_mol.SetProp(
+            "is_diversified_generated",
+            str(bool(r.get("is_diversified_generated", False))),
+        )
 
         # Numeric descriptors
         for key in [
@@ -355,11 +361,13 @@ def write_report(
             "## Screening funnel",
             "",
             f"- **Input:** {screen_stats.get('input', '?')} candidates",
+            f"- **Diversification additions:** {screen_stats.get('diversified_added', 0)} generated compounds",
             f"- **Invalid SMILES:** {screen_stats.get('invalid', 0)} dropped",
             f"- **Lipinski failures:** {screen_stats.get('lipinski_dropped', 0)} dropped",
             f"- **PAINS flagged:** {screen_stats.get('pains_dropped', 0)} dropped",
             f"- **QED errors:** {screen_stats.get('qed_errors', 0)}",
             f"- **Survivors:** {screen_stats.get('survivors', '?')}",
+            f"- **New survivors from diversification:** {screen_stats.get('diversified_survivors_added', 0)}",
             "",
         ]
     lines += [

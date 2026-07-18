@@ -3,7 +3,8 @@
 Routes (frontend calls them via the Vite /api proxy):
   POST /run                       -> {run_id}
   GET  /stream/{run_id}           -> SSE event stream
-  POST /approve/{run_id}          -> writes the export files
+    POST /approve/{run_id}          -> writes the export files
+    POST /diversify/{run_id}        -> diversifier -> cheminformatics -> critic -> gate
   GET  /download/{run_id}/{kind}  -> csv | sdf | report
 
 Orchestration is a LangGraph graph (see graph.py) with an interrupt at the
@@ -77,23 +78,25 @@ def parse_candidates(raw: bytes) -> list[dict]:
     return out
 
 
+class DiversifyIn(BaseModel):
+    mode: str = "scaffold"
+    lam: float | None = None
+    cutoff: float | None = None
+    maxGenerated: int = 200
+
+
 @app.post("/run")
 async def start_run(
     target_name: str = Form(...),
     candidates: UploadFile = File(...),
-    diversify: str = Form("scaffold"),
 ):
     raw = await candidates.read()
     parsed = parse_candidates(raw)
     if not parsed:
         raise HTTPException(400, "No SMILES found in the uploaded file.")
-    mode = (diversify or "scaffold").strip().lower()
-    if mode not in ("off", "scaffold", "mmr", "cluster"):
-        mode = "scaffold"
     run_id = uuid.uuid4().hex[:8]
     cfg = llm.get_active_config()
     run = Run(id=run_id, target_name=target_name.strip(), candidates=parsed)
-    run.diversify_mode = mode
     run.provenance = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "model": cfg.model,
@@ -126,7 +129,45 @@ async def approve(run_id: str):
     run = RUNS.get(run_id)
     if not run:
         raise HTTPException(404, "run not found")
+    if run.status != "awaiting_approval":
+        raise HTTPException(
+            400, f"can only approve at the human gate (status={run.status!r})"
+        )
     await graph.resume(run_id)  # writes the export files
+    return {"ok": True}
+
+
+@app.post("/diversify/{run_id}")
+async def diversify(run_id: str, body: DiversifyIn):
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "run not found")
+    if run.status != "awaiting_approval":
+        raise HTTPException(
+            400, f"can only diversify at the human gate (status={run.status!r})"
+        )
+
+    mode = (body.mode or "scaffold").strip().lower()
+    if mode not in ("off", "scaffold", "mmr", "cluster"):
+        raise HTTPException(400, f"unknown diversify mode: {body.mode!r}")
+
+    lam = 0.7 if body.lam is None else float(body.lam)
+    lam = max(0.0, min(1.0, lam))
+
+    cutoff = 0.35 if body.cutoff is None else float(body.cutoff)
+    cutoff = max(0.1, min(0.9, cutoff))
+
+    max_generated = int(body.maxGenerated or 200)
+    max_generated = max(1, min(5000, max_generated))
+
+    opts = {
+        "mode": mode,
+        "lam": lam,
+        "cutoff": cutoff,
+        "max_generated": max_generated,
+    }
+
+    asyncio.create_task(graph.diversify_and_retriage(run_id, opts))
     return {"ok": True}
 
 
@@ -167,6 +208,10 @@ CHAT_SYSTEM_PROMPT = (
     "yes before calling again with confirmed=true. diversify_shortlist takes a "
     "mode (off/scaffold/mmr/cluster) and, for mmr, a lambda from 0 (spread) to "
     "1 (quality). "
+    "At the human gate the operator can either approve export or trigger a "
+    "diversification rerun (diversifier -> cheminformatics -> critic) from the "
+    "UI; you cannot click buttons yourself, so explain the tradeoff and tell "
+    "them which action to take. "
     "While the pipeline is running you may only QUEUE guidance to the "
     "agents; you have no direct control. Never claim a steer took effect — "
     "report it as queued. "

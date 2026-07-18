@@ -249,8 +249,9 @@ def _screen_candidates(
         pool=run._screen_pool,
     )
 
+    prior_added = (run.screen_stats or {}).get("diversified_added", 0)
     run.survivors = survivors
-    run.screen_stats = stats
+    run.screen_stats = {**stats, "diversified_added": prior_added}
 
     emit(
         run,
@@ -260,6 +261,7 @@ def _screen_candidates(
                 "input": stats["input"],
                 "filtered": stats["survivors"],
                 "ranked": None,
+                "diversified_added": prior_added,
             },
         },
     )
@@ -366,6 +368,9 @@ def _rank_survivors(
                 "max_similarity": sim,
                 "scaffold": s.get("scaffold", ""),
                 "sa_score": s.get("sa_score"),
+                "is_diversified_generated": bool(
+                    s.get("is_diversified_generated", False)
+                ),
                 "is_known_active": (
                     bool(s.get("label")) if s.get("label") is not None else False
                 ),
@@ -389,7 +394,14 @@ def _rank_survivors(
         run,
         {
             "type": "funnel",
-            "payload": {"input": n_in, "filtered": len(survivors), "ranked": len(top)},
+            "payload": {
+                "input": (run.screen_stats or {}).get("input", n_in),
+                "filtered": len(survivors),
+                "ranked": len(top),
+                "diversified_added": (run.screen_stats or {}).get(
+                    "diversified_added", 0
+                ),
+            },
         },
     )
 

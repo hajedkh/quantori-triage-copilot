@@ -9,11 +9,11 @@ interface Props {
 // Widths encode the narrowing visually: input is full, filtered is proportional,
 // ranked is the sliver that survives. Numbers are the real counts.
 export default function FunnelMeter({ funnel, metric }: Props) {
-  const { input, filtered, ranked } = funnel;
+  const { input, filtered, ranked, diversified_added } = funnel;
   const wFiltered = filtered != null ? Math.max(38, (filtered / input) * 100) : 100;
   const wRanked =
     ranked != null && filtered != null
-      ? Math.max(24, (ranked / input) * 100)
+      ? Math.max(38, (ranked / input) * 100)
       : wFiltered;
 
   return (
@@ -22,6 +22,15 @@ export default function FunnelMeter({ funnel, metric }: Props) {
         <h3>Triage funnel</h3>
       </div>
       <div className="funnel">
+        {typeof diversified_added === "number" && diversified_added > 0 && (
+          <div className="funnel-row" style={{ marginBottom: 8 }}>
+            <div className="funnel-bar" style={{ width: "100%", borderColor: "var(--teal)", color: "var(--teal)" }}>
+              <span className="big">+{diversified_added.toLocaleString()}</span>
+              <span className="lbl">Diversification Added</span>
+            </div>
+          </div>
+        )}
+
         <div className="funnel-row">
           <div className="funnel-bar fb-input" style={{ width: "100%" }}>
             <span className="big">{input.toLocaleString()}</span>

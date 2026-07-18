@@ -347,27 +347,8 @@ export async function runMockStream(
   emit({ type: "agent_done", agent: "critic" });
   await wait(300);
 
-  // 5 — diversifier: re-selects the shortlist for chemotype spread (scaffold
-  // mode here). Mirrors the live backend's Diversifier agent.
-  emit({ type: "agent_start", agent: "diversifier" });
-  emit({
-    type: "log",
-    agent: "diversifier",
-    payload: "Re-selecting shortlist for chemotype diversity — mode=scaffold…",
-  });
-  await wait(600);
-  emit({
-    type: "diversity",
-    payload: { mode: "scaffold", lambda: 0.7, n_selected: 10, n_scaffolds: 7, n_clusters: null },
-  });
-  emit({ type: "ranked", payload: RANKED });
-  emit({
-    type: "log",
-    agent: "diversifier",
-    payload: "Diversified: 7 distinct scaffolds across top 10.",
-  });
-  await wait(300);
-  emit({ type: "agent_done", agent: "diversifier" });
+  // Human gate after critic: operator can approve export or run an
+  // additional diversification -> filter -> critic loop.
   await wait(300);
   emit({ type: "awaiting_approval" });
 }

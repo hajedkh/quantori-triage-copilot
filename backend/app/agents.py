@@ -33,7 +33,12 @@ async def supervisor(run):
         run,
         {
             "type": "funnel",
-            "payload": {"input": len(run.candidates), "filtered": None, "ranked": None},
+            "payload": {
+                "input": len(run.candidates),
+                "filtered": None,
+                "ranked": None,
+                "diversified_added": 0,
+            },
         },
     )
     emit(run, {"type": "agent_done", "agent": "supervisor"})
@@ -330,7 +335,8 @@ async def critic(run):
         ranked = chem.rank(run.survivors, run.active_ids)
         run.ranked = ranked
 
-    n_in = len(run.candidates)
+    n_in = (run.screen_stats or {}).get("input", len(run.candidates))
+    diversified_added = (run.screen_stats or {}).get("diversified_added", 0)
     emit(
         run,
         {
@@ -339,6 +345,7 @@ async def critic(run):
                 "input": n_in,
                 "filtered": len(run.survivors),
                 "ranked": len(ranked),
+                "diversified_added": diversified_added,
             },
         },
     )
@@ -371,8 +378,9 @@ async def critic(run):
 # ---------------- Diversifier ----------------
 # A separate agent under the supervisor that runs after the Critic. It takes
 # the ranked shortlist and re-selects it for chemotype diversity using the
-# mode the operator chose up front (run.diversify_mode / diversify_lambda,
-# set from the setup form). The chat copilot's diversify_shortlist tool lets
+# mode/parameters selected at rerun time from the human-gate UI prompt
+# (run.diversify_mode / diversify_lambda / diversify_cluster_cutoff /
+# diversify_max_generated). The chat copilot's diversify_shortlist tool lets
 # the operator re-run this interactively at the approval gate with a different
 # mode or MMR lambda — same chem.diversify() underneath.
 async def diversifier(run):
@@ -380,6 +388,8 @@ async def diversifier(run):
 
     mode = (getattr(run, "diversify_mode", "scaffold") or "scaffold").lower()
     lam = getattr(run, "diversify_lambda", 0.7)
+    cutoff = getattr(run, "diversify_cluster_cutoff", 0.35)
+    max_generated = getattr(run, "diversify_max_generated", 200)
 
     if mode not in chem.DIVERSITY_MODES:
         emit(
@@ -425,15 +435,27 @@ async def diversifier(run):
         )
 
     new_ranked, stats = chem.diversify(
-        run.ranked, mode=mode, lam=lam, top_n=len(run.ranked)
+        run.ranked, mode=mode, lam=lam, top_n=len(run.ranked), cutoff=cutoff
+    )
+    generated, gen_stats = chem.generate_diversified_candidates(
+        run.ranked,
+        mode=mode,
+        lam=lam,
+        cutoff=cutoff,
+        max_generated=max_generated,
     )
     run.ranked = new_ranked
+    run.diversified_candidates = generated
+    run.diversified_seed_count = gen_stats.get("seed_count", 0)
     run.diversity_stats = stats
+    run.diversity_stats["n_generated"] = len(generated)
+    run.diversity_stats["seed_count"] = gen_stats.get("seed_count", 0)
 
     emit(run, {"type": "diversity", "payload": stats})
     emit(run, {"type": "ranked", "payload": new_ranked})
 
-    n_in = len(run.candidates)
+    n_in = (run.screen_stats or {}).get("input", len(run.candidates))
+    diversified_added = (run.screen_stats or {}).get("diversified_added", 0)
     emit(
         run,
         {
@@ -442,6 +464,7 @@ async def diversifier(run):
                 "input": n_in,
                 "filtered": len(run.survivors),
                 "ranked": len(new_ranked),
+                "diversified_added": diversified_added,
             },
         },
     )
@@ -466,7 +489,7 @@ async def diversifier(run):
         cl = f" · {stats['n_clusters']} clusters" if stats.get("n_clusters") else ""
         summary = (
             f"Diversified: {stats['n_scaffolds'] or '?'} distinct scaffolds "
-            f"across top {stats['n_selected']}{cl}."
+            f"across top {stats['n_selected']}{cl}. Generated {len(generated)} new candidates."
         )
     emit(run, {"type": "log", "agent": "diversifier", "payload": summary})
     emit(run, {"type": "agent_done", "agent": "diversifier"})
