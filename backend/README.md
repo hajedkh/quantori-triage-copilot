@@ -1,169 +1,273 @@
-# Target Triage Copilot — Backend
+# Target Triage Copilot Backend
 
-FastAPI backend for the drug-discovery triage agent. You give it a target
-protein and a pile of candidate molecules, and it comes back with a ranked,
-explained shortlist. Four agents run in sequence (Supervisor, Knowledge,
-Cheminformatics, Critic), everything streams to the frontend over SSE, and
-nothing gets exported until a human approves it.
+This backend is a FastAPI service for interactive, human-in-the-loop
+small-molecule triage. It combines:
 
-## Diagrams
+1. Deterministic RDKit cheminformatics for filtering and scoring.
+2. Agentic orchestration (Supervisor, Knowledge, Cheminformatics, Critic,
+  optional Diversifier rerun).
+3. Live SSE streaming to the frontend.
+4. Approval-gated export of CSV, SDF, and report artifacts.
+5. A tool-calling chat copilot for run introspection and gate-time decisions.
 
-_(placeholders — will drop images in here)_
+## What It Does
 
-**Global / deployment diagram**
+Given a target and a candidate library, the backend:
 
-`![global diagram](./docs/diagrams/global.png)`
+1. Resolves the target and initializes the funnel.
+2. Pulls known actives and literature context (with fallbacks).
+3. Screens candidates with RDKit filters.
+4. Ranks survivors with configurable ranking profiles.
+5. Waits at a human approval gate.
+6. On approval, exports:
+  1. `shortlist.csv`
+  2. `shortlist.sdf` (with 3D conformer generation)
+  3. `report.md`
 
-**Software / architecture diagram**
+At the gate, operators can also request diversification + retriage before
+approving.
 
-`![architecture diagram](./docs/diagrams/architecture.png)`
+## Quick Start
 
-**Agentic workflow diagram**
-
-`![agentic workflow](./docs/diagrams/agentic-workflow.png)`
-
-**Sequence diagram**
-
-`![sequence diagram](./docs/diagrams/sequence.png)`
-
-## Run it
+From this folder:
 
 ```bash
-cd backend
 ./run.sh
 ```
 
-Creates a virtualenv, installs deps, starts the server on
-**http://localhost:8000**. First run takes a minute — RDKit's the big one.
+This script:
 
-Manual version if you'd rather:
+1. Creates `.venv` if missing.
+2. Installs `requirements.txt`.
+3. Starts Uvicorn at `http://localhost:8000`.
+
+Manual equivalent:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-Then in the frontend, flip the header toggle to **LIVE**. Vite proxies `/api`
-to `localhost:8000`, so there's no CORS setup to worry about.
+## Environment and LLM Providers
 
-## LLM setup
+The backend supports two OpenAI-compatible providers via `app/llm.py`:
 
-Both agentic agents (Cheminformatics and Critic) and the Knowledge agent's
-dossier need an LLM behind them. Two providers, both OpenAI-compatible so it's
-one code path either way:
+1. `ollama` (local)
+2. `gateway` (hosted)
 
-- **Ollama**, local — `ollama serve` and pull a model that actually supports
-  tool calling (`ollama pull qwen2.5:7b` — `mistral` looked fine at first but
-  quietly breaks once you hand it more than a couple of tools, so don't use it
-  for the agentic agents).
-- **Quantori Litellm Gateway** — a hosted proxy, currently routes to a mix of
-  OpenAI/Anthropic/Google models. See `.env.example` at the repo root for the
-  keys it needs.
+Frontend and backend can switch active provider/model at runtime through
+`/config/llm` endpoints.
 
-Config lives in `.env` at the **repo root**, not in `backend/`. Copy
-`.env.example`, fill in the gateway key, done. You can also switch providers
-live from the UI (top-right dropdown) without restarting anything.
+## High-Level Architecture
 
-## Test it without the frontend
+Main modules:
 
-```bash
-curl http://localhost:8000/            # health -> {"ok": true, ...}
+1. `app/main.py`: FastAPI routes, run/session lifecycle, chat and config APIs.
+2. `app/graph.py`: Orchestration and gate-resume behavior.
+3. `app/agents.py`: Agent implementations.
+4. `app/tools.py`: Tool schemas/execution for Cheminformatics and Critic.
+5. `app/chat_tools.py`: Read/mutate toolset for chat copilot.
+6. `app/chem.py`: RDKit chemistry core (screening, scoring, diversity).
+7. `app/export.py`: CSV/SDF/report generation and cross-reference enrichment.
+8. `app/store.py`: Shared `Run` dataclass, registry, event emitter.
+9. `app/sources.py`: ChEMBL and PubMed acquisition with fallbacks.
+
+## Orchestration Flow
+
+Primary path:
+
+1. `supervisor`
+2. `knowledge`
+3. `cheminformatics`
+4. `critic`
+5. `human_gate`
+6. `export`
+
+Gate-time alternate path (operator-triggered):
+
+1. `diversifier`
+2. `cheminformatics`
+3. `critic`
+4. back to `human_gate`
+
+Note: due to runtime limitations with `interrupt()` resume in this environment,
+approval export runs from `Run` state directly in `graph.resume()`.
+
+## Public API
+
+### Core run lifecycle
+
+1. `POST /run`
+   1. multipart fields: `target_name`, `candidates`, optional `ranking_profile`
+   2. returns `{ "run_id": "..." }`
+2. `GET /stream/{run_id}`: SSE stream of run events.
+1. `POST /approve/{run_id}`
+   1. body: optional `{ "rankingProfile": "balanced|quality|explore|strict" }`
+   2. applies deterministic gate rerank then exports.
+2. `POST /diversify/{run_id}`: body: diversification mode/options and ranking profile.
+1. `POST /rerank/{run_id}`
+   1. body: `{ "rankingProfile": ... }`
+   2. reranks at gate without exporting.
+2. `GET /download/{run_id}/{kind}`
+   1. `kind`: `csv | sdf | report`.
+
+### Chat/session endpoints
+
+1. `POST /session`: create setup-phase run for chat-first UX.
+1. `POST /upload/{run_id}`: attach candidate file to setup run without starting pipeline.
+2. `POST /chat/{run_id}`: SSE-style streamed chat response with tool-call events.
+3. `POST /steer/{run_id}`: queue operator guidance while run is `running`.
+
+### LLM/runtime config
+
+1. `GET /config/llm`
+2. `POST /config/llm`
+3. `GET /config/llm/health`
+
+### Utility endpoints
+
+1. `GET /mol3d/{run_id}/{rank}`: on-demand 3D conformer molblock for viewer.
+2. `GET /`: health check.
+
+## SSE Event Model
+
+Core event envelope:
+
+```json
+{ "type": "...", "agent": "...", "payload": {} }
 ```
 
-Or just drive the whole thing with curl and the demo CSV — see the API table
-below.
+Common event types:
 
-## Demo files
+1. `agent_start`
+2. `agent_done`
+3. `target_resolved`
+4. `log`
+5. `funnel`
+6. `dossier_token`
+7. `citations`
+8. `grounding`
+9. `tool_call`
+10. `ranked`
+11. `metric`
+12. `diversity`
+13. `awaiting_approval`
+14. `export_progress`
 
-- `demo/egfr_candidates.csv` — small, 51 molecules (10 real EGFR inhibitors +
-  41 decoys). Good for a quick run.
-- `demo/data.csv` — much bigger, ~20k molecules pulled from DUD-E. Use this if
-  you want the shortlist to have more than a handful of rows — the Critic
-  drops anything below "Medium" confidence, so a small candidate pool means a
-  small shortlist. More candidates in, more chances of clearing the bar.
-- `demo/getsmiles.py` — the script that fetched `data.csv`. No deps, stdlib
-  only. `./getsmiles.py --target braf` to grab a different target.
+`export_progress` is emitted during approval export and includes stage/message
+for UX and chat introspection.
 
-The `label` column in either file is hidden ground truth, only used to compute
-the recovery metric at the end — the ranking itself never sees it.
+## Ranking Profiles
 
-## What's real vs. what's not
+Supported profiles:
 
-- **All the chemistry is real.** RDKit does the standardization, Lipinski
-  check, PAINS filter, Morgan fingerprints, Tanimoto similarity — on your
-  actual uploaded molecules, every time. No LLM anywhere near that math.
-- **ChEMBL and PubMed are fetched live** when reachable, with a small bundled
-  fallback so a flaky connection doesn't kill a live demo.
-- **Cheminformatics and Critic are genuinely agentic** — they call real tools,
-  decide their own thresholds/weights, and adapt when a tool call fails. Not
-  scripted, not a fixed pipeline of prompts.
+1. `balanced`
+2. `quality`
+3. `explore`
+4. `strict`
 
-## API
+Profiles influence scoring weights, confidence policy, and are carried through:
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/run` | multipart `target_name` + `candidates` (CSV) → `{run_id}` |
-| GET  | `/stream/{run_id}` | SSE stream of pipeline events |
-| POST | `/approve/{run_id}` | write CSV / SDF / report to disk |
-| GET  | `/download/{run_id}/{csv\|sdf\|report}` | download an artifact |
-| GET  | `/config/llm` | current provider/model + what's available |
-| POST | `/config/llm` | switch provider/model |
-| GET  | `/config/llm/health` | ping a provider |
+1. initial run (`/run` optional `ranking_profile`)
+2. gate rerank (`/rerank`)
+3. approve export (`/approve`)
+4. diversification rerun (`/diversify`)
 
-SSE events are JSON: `{ "type": ..., "agent"?: ..., "payload"?: ... }`. Types:
-`agent_start`, `agent_done`, `target_resolved`, `log`, `dossier_token`,
-`citations`, `funnel`, `tool_call`, `ranked`, `metric`, `awaiting_approval`.
+## Export Behavior
 
-`tool_call` is the interesting one — it's what lets the frontend show, live,
-which tool an agent just called, with what arguments, and whether it worked.
+On approve, export does the following:
 
-## Structure
+1. Builds enriched CSV rows (descriptors + cross-reference fields).
+2. Performs cross-reference checks for ChEMBL/PubChem in parallel.
+3. Generates SDF with 3D conformers (ETKDG + force-field optimization,
+  with fallback behavior).
+4. Writes report with provenance, funnel, cross-reference summary, dossier,
+  citations, and ranked shortlist.
 
-```
+Cross-reference metadata is persisted on `Run` for chat tools:
+
+1. `xref_summary`
+2. `xref_by_smiles`
+3. `export_artifacts`
+4. `export_progress`
+
+## Chat Copilot Tooling
+
+Chat has status-gated tools:
+
+1. Setup: status/read-only essentials.
+2. Running/exported: read tools.
+3. Awaiting approval: read + mutate preview/confirm tools.
+
+Key read categories include:
+
+1. Run status and trace.
+2. Ranked/survivor inspection.
+3. Dossier/citations.
+4. Funnel/scaffold/metric summaries.
+5. Methods and report metadata.
+6. Cross-reference coverage and per-compound IDs.
+7. Export stage/status introspection.
+8. Score component explanation and profile comparison.
+
+Mutate tools at gate use preview-then-confirm semantics (`confirmed=true` to
+commit):
+
+1. `rerank`
+2. `focus_scaffold`
+3. `diversify_shortlist`
+
+## Dependencies
+
+From `requirements.txt`:
+
+1. `fastapi`
+2. `uvicorn[standard]`
+3. `sse-starlette`
+4. `python-multipart`
+5. `requests`
+6. `rdkit`
+7. `langgraph`
+8. `openai`
+9. `python-dotenv`
+10. `pydantic-settings`
+
+## File Layout
+
+```text
 backend/
-├── app/
-│   ├── main.py        # FastAPI routes, run manager, SSE, CSV parsing
-│   ├── graph.py       # LangGraph wiring: nodes + edges + human-gate
-│   ├── agents.py       # the 4 agents as async functions
-│   ├── tools.py        # tool schemas + implementations for the agentic agents
-│   ├── loop.py          # the tool-calling loop shared by those agents
-│   ├── store.py         # shared Run object + registry + emit helper
-│   ├── chem.py           # RDKit: standardize, filter, similarity, score
-│   ├── sources.py        # ChEMBL + PubMed clients (with fallbacks)
-│   ├── llm.py             # OpenAI-compatible chat layer, both providers
-│   ├── export.py           # CSV / SDF / report writers
-│   └── data/
-│       └── fallback.py      # bundled actives + target aliases
-├── demo/
-│   ├── egfr_candidates.csv
-│   ├── data.csv
-│   └── getsmiles.py
-├── requirements.txt
-├── run.sh
-└── README.md
+  app/
+   agents.py
+   chat_tools.py
+   chem.py
+   conformers.py
+   export.py
+   graph.py
+   llm.py
+   loop.py
+   main.py
+   sources.py
+   store.py
+   tools.py
+   data/
+    fallback.py
+  demo/
+   data.csv
+   egfr_candidates.csv
+   getsmiles.py
+  runs/
+  requirements.txt
+  run.sh
+  README.md
 ```
 
-## Orchestration
+## Notes and Caveats
 
-It's a LangGraph `StateGraph`, one straight line, no branching:
-
-```
-supervisor → knowledge → cheminformatics → critic → human_gate → export
-```
-
-Each agent is a node. Heavy data (candidates, dossier, ranked results) lives
-on a plain `Run` object looked up by id — the graph's own state only carries
-that id, so the checkpoint stays tiny.
-
-Cheminformatics and Critic aren't just prompt-fill-in-the-blank nodes — inside
-each one, an LLM runs a real tool-calling loop: it picks a tool, sees the
-actual result, decides what to do next, up to 6 rounds. Two different runs
-against two different targets genuinely make different decisions from the
-same starting instructions — that's the whole point.
-
-One honest caveat: the human-approval step doesn't resume the LangGraph
-checkpoint the way the docs for `interrupt()` describe — that path is broken
-on this Python version. Approval works by pulling the finished data straight
-off the `Run` object instead. Everything downstream of it works fine either
-way.
+1. `Run` objects are in-memory process state.
+2. SSE stream closes at `awaiting_approval`; frontend re-subscribes as needed.
+3. Setup-phase sessions intentionally do not enqueue pipeline SSE events to
+  avoid unbounded queue growth before run start.
+4. Cross-reference lookups and 3D generation can be the longest export stages,
+  which is why explicit `export_progress` events are emitted.
