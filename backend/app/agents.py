@@ -80,7 +80,8 @@ async def knowledge(run):
             {
                 "type": "log",
                 "agent": "knowledge",
-                "payload": f"Warning: {len(grounding['ungrounded'])} citation(s) could not be grounded to provided sources.",
+                "payload": f"Warning: {len(grounding['ungrounded'])} citation(s) could not be grounded to "
+                + "provided sources.",
             },
         )
     # stream the dossier word by word — the text already exists in full,
@@ -88,6 +89,7 @@ async def knowledge(run):
     for tok in dossier.split(" "):
         emit(run, {"type": "dossier_token", "payload": tok + " "})
     emit(run, {"type": "citations", "payload": citations})
+    emit(run, {"type": "grounding", "payload": grounding})
     emit(run, {"type": "agent_done", "agent": "knowledge"})
 
 

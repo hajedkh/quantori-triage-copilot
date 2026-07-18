@@ -25,6 +25,7 @@ class Run:
     ranked: list = field(default_factory=list)
     dossier: str = ""
     citations: list = field(default_factory=list)
+    grounding: dict | None = None  # PMID-grounding report from build_dossier
     metric: dict | None = None
     screen_stats: dict | None = (
         None  # stats dict from the last screen_candidates tool call

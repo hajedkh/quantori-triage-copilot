@@ -12,6 +12,7 @@ tiny.
 """
 
 from __future__ import annotations
+import logging
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, START, END
@@ -20,6 +21,8 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from . import agents, export
 from .store import RUNS, emit
+
+logger = logging.getLogger(__name__)
 
 
 class GState(TypedDict):
@@ -71,6 +74,8 @@ async def export_node(state: GState):
         run.citations,
         run.ranked,
         run.metric,
+        screen_stats=run.screen_stats,
+        grounding=run.grounding,
     )
     run.status = "exported"
     return {}
@@ -111,7 +116,18 @@ async def run_until_gate(run_id: str):
         async for _ in GRAPH.astream({"run_id": run_id}, _config(run_id)):
             pass
     except Exception as e:  # never leave the stream hanging
-        emit(run, {"type": "log", "agent": "supervisor", "payload": f"Error: {e}"})
+        # Full traceback to the server log (uvicorn stderr); the browser only
+        # gets a one-line summary. This is the swallow point that hid the
+        # earlier NameError — logger.exception() records where it blew up.
+        logger.exception("run %s aborted before the human gate", run_id)
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "supervisor",
+                "payload": f"Error: {type(e).__name__}: {e}",
+            },
+        )
         emit(run, {"type": "awaiting_approval"})
         run.status = "awaiting_approval"
         run.queue.put_nowait(None)
@@ -130,12 +146,20 @@ async def resume(run_id: str):
     from pathlib import Path
 
     runs_dir = Path(__file__).resolve().parent.parent / "runs"
-    export.export_all(
-        runs_dir / run.id,
-        run.target_name,
-        run.dossier,
-        run.citations,
-        run.ranked,
-        run.metric,
-    )
+    try:
+        export.export_all(
+            runs_dir / run.id,
+            run.target_name,
+            run.dossier,
+            run.citations,
+            run.ranked,
+            run.metric,
+            screen_stats=run.screen_stats,
+            grounding=run.grounding,
+        )
+    except Exception:
+        # Surfaces as a 500 to the /approve caller; log the traceback so the
+        # cause is visible server-side rather than just the HTTP error.
+        logger.exception("export failed for run %s", run_id)
+        raise
     run.status = "exported"

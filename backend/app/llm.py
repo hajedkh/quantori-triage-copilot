@@ -196,8 +196,8 @@ def list_ollama_models(timeout: float = 3.0) -> list[str]:
 
 async def build_dossier(
     target: str, abstracts: list[dict], cfg: LLMConfig | None = None
-) -> tuple[str, list[dict]]:
-    """Return (dossier_text_with_[[PMID:x]]_markers, citations).
+) -> tuple[str, list[dict], dict]:
+    """Return (dossier_text_with_[[PMID:x]]_markers, citations, grounding).
 
     Tries the active LLM provider; on any failure (down, timeout, error)
     falls back to a deterministic cited template so a demo never breaks.
