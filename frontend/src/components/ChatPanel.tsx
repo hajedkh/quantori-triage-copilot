@@ -21,13 +21,16 @@ const GREETING =
   "are you screening?";
 
 function chipsFor(status: RunStatus): string[] {
-  if (status === "idle") return ["How do I start a run?"];
-  if (status === "running") return ["What has it done so far?", "How many survivors?"];
+  if (status === "idle") return ["How do I start a run?", "What does the diversity setting do?"];
+  if (status === "running")
+    return ["What has it done so far?", "How many survivors?", "What thresholds did it use?", "How many did PAINS drop?"];
   if (status === "awaiting_approval")
     return [
       "Why did #1 rank first?",
+      "Which scaffolds dominate the top 20?",
+      "Diversify across scaffolds",
+      "How many known actives did we recover?",
       "Show me neighbours of #3",
-      "Re-rank favouring similarity",
     ];
   return [];
 }
@@ -211,6 +214,7 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
 
   const runSteerTurn = async (text: string) => {
     if (!runId) return;
+    setSending(true);
     setMessages((m) => [
       ...m,
       { role: "user", content: text },
@@ -223,6 +227,7 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
       setMessages((m) => [...m, { role: "assistant", content: `Couldn't queue that: ${String(err)}` }]);
       setPendingSteer(null);
     } finally {
+      setSending(false);
       inFlightRef.current = false;
     }
   };

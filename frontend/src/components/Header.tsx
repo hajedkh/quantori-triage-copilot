@@ -171,8 +171,8 @@ export default function Header({ mode, onMode, status, onHealthChange, onHome }:
     health.status === "checking"
       ? "Checking…"
       : health.ok
-      ? `Healthy · ${health.latency_ms}ms`
-      : `Down${health.error ? " · " + health.error : ""}`;
+        ? `Healthy · ${health.latency_ms}ms`
+        : `Down${health.error ? " · " + health.error : ""}`;
 
   const demoLocked = mode === "mock";
   const currentModels = options[provider];
@@ -181,16 +181,16 @@ export default function Header({ mode, onMode, status, onHealthChange, onHome }:
     status === "running"
       ? "dot live"
       : status === "awaiting_approval"
-      ? "dot wait"
-      : status === "exported"
-      ? "dot done"
-      : status === "idle"
-      ? backendUp === true
-        ? "dot up"
-        : backendUp === false
-        ? "dot down"
-        : "dot"
-      : "dot";
+        ? "dot wait"
+        : status === "exported"
+          ? "dot done"
+          : status === "idle"
+            ? backendUp === true
+              ? "dot up"
+              : backendUp === false
+                ? "dot down"
+                : "dot"
+            : "dot";
 
   return (
     <header className="hdr">
@@ -205,6 +205,42 @@ export default function Header({ mode, onMode, status, onHealthChange, onHome }:
       </button>
 
       <div className="hdr-right">
+        <div
+          className="mode-toggle"
+          role="group"
+          aria-label="Run mode"
+          style={{
+            display: "inline-flex",
+            border: "1px solid var(--line, #2a2f3a)",
+            borderRadius: 8,
+            overflow: "hidden",
+            marginRight: 10,
+          }}
+        >
+          {(["mock", "live"] as const).map((m) => {
+            const active = mode === m;
+            return (
+              <button
+                key={m}
+                onClick={() => onMode(m)}
+                title={m === "mock" ? "Demo mode — no backend needed" : "Live mode — talks to the backend"}
+                style={{
+                  padding: "5px 12px",
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  letterSpacing: 0.4,
+                  border: "none",
+                  cursor: "pointer",
+                  background: active ? "var(--teal, #1f9c8e)" : "transparent",
+                  color: active ? "#fff" : "var(--fg-dim, #9aa4b2)",
+                }}
+              >
+                {m === "mock" ? "DEMO" : "LIVE"}
+              </button>
+            );
+          })}
+        </div>
+
         <div className="llm-ctl" title={demoLocked ? "Provider switching applies to LIVE runs." : undefined}>
           <span className={dotClass} title={dotTitle} />
           {provider === "gateway" ? (

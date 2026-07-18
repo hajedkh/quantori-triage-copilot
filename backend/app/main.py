@@ -17,6 +17,7 @@ import io
 import csv
 import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -77,13 +78,28 @@ def parse_candidates(raw: bytes) -> list[dict]:
 
 
 @app.post("/run")
-async def start_run(target_name: str = Form(...), candidates: UploadFile = File(...)):
+async def start_run(
+    target_name: str = Form(...),
+    candidates: UploadFile = File(...),
+    diversify: str = Form("scaffold"),
+):
     raw = await candidates.read()
     parsed = parse_candidates(raw)
     if not parsed:
         raise HTTPException(400, "No SMILES found in the uploaded file.")
+    mode = (diversify or "scaffold").strip().lower()
+    if mode not in ("off", "scaffold", "mmr", "cluster"):
+        mode = "scaffold"
     run_id = uuid.uuid4().hex[:8]
-    RUNS[run_id] = Run(id=run_id, target_name=target_name.strip(), candidates=parsed)
+    cfg = llm.get_active_config()
+    run = Run(id=run_id, target_name=target_name.strip(), candidates=parsed)
+    run.diversify_mode = mode
+    run.provenance = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "model": cfg.model,
+        "provider": cfg.provider,
+    }
+    RUNS[run_id] = run
     # run the graph until it pauses at the human gate
     asyncio.create_task(graph.run_until_gate(run_id))
     return {"run_id": run_id}
@@ -139,10 +155,18 @@ CHAT_SYSTEM_PROMPT = (
     "know. You have no general chemistry knowledge to offer: everything you "
     "state must trace to a tool result. Always cite: rank #, ChEMBL id, tool "
     "name, or PMID. "
-    "Before any change, preview it and ask. A mutate tool called without "
-    "confirmed=true returns a preview, not a result — relay exactly what "
-    "would change and wait for the operator's yes before calling again with "
-    "confirmed=true. "
+    "For workflow/status questions use get_run_status and get_agent_trace; for "
+    "the screening funnel use get_funnel_breakdown (invalid/Lipinski/PAINS/"
+    "survivors); for chemotype coverage use get_scaffold_summary; for the "
+    "held-out validation use get_metric; for a single compound use "
+    "get_molecule/explain/why_not/similar_to. "
+    "Before any change, preview it and ask. A mutate tool (rerank, "
+    "focus_scaffold, diversify_shortlist) called without confirmed=true returns "
+    "a preview, not a result — relay exactly what would change (which molecules "
+    "enter/leave the top 20, how many scaffolds) and wait for the operator's "
+    "yes before calling again with confirmed=true. diversify_shortlist takes a "
+    "mode (off/scaffold/mmr/cluster) and, for mmr, a lambda from 0 (spread) to "
+    "1 (quality). "
     "While the pipeline is running you may only QUEUE guidance to the "
     "agents; you have no direct control. Never claim a steer took effect — "
     "report it as queued. "
@@ -192,7 +216,9 @@ async def chat(run_id: str, body: ChatIn):
     if not run:
         raise HTTPException(404, "run not found")
 
-    transcript = "".join(f"{t['role']}: {t['content']}\n" for t in run.chat_history[-6:])
+    transcript = "".join(
+        f"{t['role']}: {t['content']}\n" for t in run.chat_history[-6:]
+    )
     user_msg = f"{transcript}user: {body.message}" if transcript else body.message
     tools = chat_tools.tools_for_status(run.status)
 
@@ -220,8 +246,15 @@ async def chat(run_id: str, body: ChatIn):
         # already how every event gets recorded) doesn't steal from it.
         task = asyncio.create_task(
             loop.run_tool_loop(
-                run, "chat", CHAT_SYSTEM_PROMPT, user_msg, tools, executor,
-                cfg=cfg, max_iters=2, force_tool_first=False,
+                run,
+                "chat",
+                CHAT_SYSTEM_PROMPT,
+                user_msg,
+                tools,
+                executor,
+                cfg=cfg,
+                max_iters=2,
+                force_tool_first=False,
             )
         )
         sent = start_idx
@@ -252,7 +285,9 @@ async def steer(run_id: str, body: SteerIn):
     if not run:
         raise HTTPException(404, "run not found")
     if run.status != "running":
-        raise HTTPException(400, f"can only steer a running pipeline (status={run.status!r})")
+        raise HTTPException(
+            400, f"can only steer a running pipeline (status={run.status!r})"
+        )
     run.inbox.append(body.message)
     return {"queued": True, "position": len(run.inbox)}
 

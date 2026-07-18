@@ -41,6 +41,7 @@ _MAX_EXAMPLES = 3
 
 # ---------------------------------------------------------------- schemas --
 
+
 def get_run_status_schema() -> dict:
     return {
         "type": "function",
@@ -60,7 +61,12 @@ def get_agent_trace_schema() -> dict:
             "description": "Get the real, recorded tool-call trace of what the agents have actually done.",
             "parameters": {
                 "type": "object",
-                "properties": {"n": {"type": "integer", "description": "How many recent tool calls. Default 15."}},
+                "properties": {
+                    "n": {
+                        "type": "integer",
+                        "description": "How many recent tool calls. Default 15.",
+                    }
+                },
                 "required": [],
             },
         },
@@ -75,7 +81,12 @@ def get_ranked_schema() -> dict:
             "description": "Get the current ranked shortlist, compact fields only.",
             "parameters": {
                 "type": "object",
-                "properties": {"n": {"type": "integer", "description": "How many rows. Default 20."}},
+                "properties": {
+                    "n": {
+                        "type": "integer",
+                        "description": "How many rows. Default 20.",
+                    }
+                },
                 "required": [],
             },
         },
@@ -90,7 +101,12 @@ def get_molecule_schema() -> dict:
             "description": "Get the full descriptor record for one ranked molecule by its rank.",
             "parameters": {
                 "type": "object",
-                "properties": {"rank": {"type": "integer", "description": "1-indexed rank in the shortlist."}},
+                "properties": {
+                    "rank": {
+                        "type": "integer",
+                        "description": "1-indexed rank in the shortlist.",
+                    }
+                },
                 "required": ["rank"],
             },
         },
@@ -116,7 +132,12 @@ def explain_schema() -> dict:
             "description": "Get the exact stored reason a ranked molecule scored where it did — never re-reason this yourself.",
             "parameters": {
                 "type": "object",
-                "properties": {"rank": {"type": "integer", "description": "1-indexed rank in the shortlist."}},
+                "properties": {
+                    "rank": {
+                        "type": "integer",
+                        "description": "1-indexed rank in the shortlist.",
+                    }
+                },
                 "required": ["rank"],
             },
         },
@@ -131,7 +152,9 @@ def why_not_schema() -> dict:
             "description": "Find the exact filter gate that rejected (or didn't reject) a specific SMILES.",
             "parameters": {
                 "type": "object",
-                "properties": {"smiles": {"type": "string", "description": "The SMILES to check."}},
+                "properties": {
+                    "smiles": {"type": "string", "description": "The SMILES to check."}
+                },
                 "required": ["smiles"],
             },
         },
@@ -147,8 +170,14 @@ def similar_to_schema() -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "rank": {"type": "integer", "description": "1-indexed rank of the reference molecule."},
-                    "k": {"type": "integer", "description": "How many neighbours. Default 5."},
+                    "rank": {
+                        "type": "integer",
+                        "description": "1-indexed rank of the reference molecule.",
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "How many neighbours. Default 5.",
+                    },
                 },
                 "required": ["rank"],
             },
@@ -161,23 +190,91 @@ def rerank_schema() -> dict:
         "type": "function",
         "function": {
             "name": "rerank",
-            "description": "Preview or apply a re-score of survivors with different similarity/qed/pains weights.",
+            "description": "Preview or apply a re-score of survivors with different scoring weights.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "weights": {
                         "type": "object",
-                        "description": "similarity/qed/pains weights. Defaults 0.6/0.3/0.1.",
+                        "description": "Score weights. Defaults: similarity 0.40, breadth 0.15, qed 0.20, sa 0.15, penalty_lipinski 0.05, penalty_pains 0.03.",
                         "properties": {
                             "similarity": {"type": "number"},
+                            "breadth": {"type": "number"},
                             "qed": {"type": "number"},
-                            "pains": {"type": "number"},
+                            "sa": {"type": "number"},
+                            "penalty_lipinski": {"type": "number"},
+                            "penalty_pains": {"type": "number"},
                         },
                     },
-                    "confirmed": {"type": "boolean", "description": "Set true to apply. Default false previews."},
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Set true to apply. Default false previews.",
+                    },
                 },
                 "required": [],
             },
+        },
+    }
+
+
+def diversify_shortlist_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "diversify_shortlist",
+            "description": "Preview or apply a chemotype-diversity rerank of the shortlist (scaffold, mmr, or cluster).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["off", "scaffold", "mmr", "cluster"],
+                        "description": "off=pure score; scaffold=Bemis-Murcko round-robin; mmr=maximal marginal relevance; cluster=Butina.",
+                    },
+                    "lam": {
+                        "type": "number",
+                        "description": "MMR trade-off 0-1 (1=quality, 0=spread). Only used for mmr. Default 0.7.",
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Set true to apply. Default false previews.",
+                    },
+                },
+                "required": ["mode"],
+            },
+        },
+    }
+
+
+def get_funnel_breakdown_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_funnel_breakdown",
+            "description": "Get the screening drop breakdown: how many were invalid, Lipinski-dropped, PAINS-dropped, and survived.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+def get_scaffold_summary_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_scaffold_summary",
+            "description": "Get how many distinct Bemis-Murcko scaffolds are in the shortlist and which dominate.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+def get_metric_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_metric",
+            "description": "Get the held-out validation metric: known actives recovered in the ranked top-N.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
     }
 
@@ -191,8 +288,14 @@ def focus_scaffold_schema() -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "smarts": {"type": "string", "description": "A SMARTS substructure pattern."},
-                    "confirmed": {"type": "boolean", "description": "Set true to apply. Default false previews."},
+                    "smarts": {
+                        "type": "string",
+                        "description": "A SMARTS substructure pattern.",
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Set true to apply. Default false previews.",
+                    },
                 },
                 "required": ["smarts"],
             },
@@ -211,11 +314,15 @@ READ_TOOLS = [
     explain_schema(),
     why_not_schema(),
     similar_to_schema(),
+    get_funnel_breakdown_schema(),
+    get_scaffold_summary_schema(),
+    get_metric_schema(),
 ]
 
 MUTATE_TOOLS = [
     rerank_schema(),
     focus_scaffold_schema(),
+    diversify_shortlist_schema(),
 ]
 
 
@@ -230,6 +337,7 @@ def tools_for_status(status: str) -> list:
 
 # ---------------------------------------------------------- implementations --
 # (read)
+
 
 def _get_run_status(run) -> dict:
     agents_done = [e.get("agent") for e in run.events if e.get("type") == "agent_done"]
@@ -284,7 +392,9 @@ def _get_ranked(run, n: int = 20) -> dict:
 
 def _get_molecule(run, rank: int) -> dict:
     if rank < 1 or rank > len(run.ranked):
-        raise ValueError(f"rank {rank} out of range — only {len(run.ranked)} ranked results exist")
+        raise ValueError(
+            f"rank {rank} out of range — only {len(run.ranked)} ranked results exist"
+        )
     smiles = run.ranked[rank - 1]["smiles"]
     for s in run.survivors:
         if s["smiles"] == smiles:
@@ -296,11 +406,59 @@ def _get_dossier(run) -> dict:
     return {"dossier": run.dossier, "citations": run.citations}
 
 
+def _get_funnel_breakdown(run) -> dict:
+    st = run.screen_stats
+    if not st:
+        return {"available": False, "message": "no screen has run yet"}
+    return {
+        "available": True,
+        "input": st.get("input"),
+        "invalid_smiles": st.get("invalid", 0),
+        "lipinski_dropped": st.get("lipinski_dropped", 0),
+        "pains_dropped": st.get("pains_dropped", 0),
+        "qed_errors": st.get("qed_errors", 0),
+        "survivors": st.get("survivors"),
+    }
+
+
+def _get_scaffold_summary(run) -> dict:
+    if not run.ranked:
+        return {"available": False, "message": "no ranked shortlist yet"}
+    from collections import Counter
+
+    counts = Counter(r.get("scaffold", "") for r in run.ranked if r.get("scaffold"))
+    top = counts.most_common(_MAX_EXAMPLES)
+    out = {
+        "ranked_count": len(run.ranked),
+        "distinct_scaffolds": len(counts),
+        "top_scaffolds": [{"scaffold": s, "count": n} for s, n in top],
+    }
+    if run.diversity_stats:
+        out["diversity_pass"] = run.diversity_stats
+    return out
+
+
+def _get_metric(run) -> dict:
+    if not run.metric:
+        return {
+            "available": False,
+            "message": "validation metric not computed (no labelled actives in input)",
+        }
+    return dict(run.metric)
+
+
 def _explain(run, rank: int) -> dict:
     if rank < 1 or rank > len(run.ranked):
-        raise ValueError(f"rank {rank} out of range — only {len(run.ranked)} ranked results exist")
+        raise ValueError(
+            f"rank {rank} out of range — only {len(run.ranked)} ranked results exist"
+        )
     r = run.ranked[rank - 1]
-    return {"rank": r["rank"], "smiles": r["smiles"], "reason": r["reason"], "evidence_used": r.get("evidence_used", [])}
+    return {
+        "rank": r["rank"],
+        "smiles": r["smiles"],
+        "reason": r["reason"],
+        "evidence_used": r.get("evidence_used", []),
+    }
 
 
 def _why_not(run, smiles: str) -> dict:
@@ -315,7 +473,9 @@ def _why_not(run, smiles: str) -> dict:
     hba_max = stats.get("hba_max", 10)
 
     d = chem.descriptors(mol)
-    lip = chem.lipinski_pass(d, mw_max=mw_max, logp_max=logp_max, hbd_max=hbd_max, hba_max=hba_max)
+    lip = chem.lipinski_pass(
+        d, mw_max=mw_max, logp_max=logp_max, hbd_max=hbd_max, hba_max=hba_max
+    )
     if not lip:
         return {
             "verdict": "dropped at Lipinski",
@@ -323,17 +483,32 @@ def _why_not(run, smiles: str) -> dict:
             "logp": d["logp"],
             "hbd": d["hbd"],
             "hba": d["hba"],
-            "thresholds": {"mw_max": mw_max, "logp_max": logp_max, "hbd_max": hbd_max, "hba_max": hba_max},
+            "thresholds": {
+                "mw_max": mw_max,
+                "logp_max": logp_max,
+                "hbd_max": hbd_max,
+                "hba_max": hba_max,
+            },
         }
 
     if chem.pains_flag(mol):
         return {"verdict": "PAINS flagged"}
 
     active_fps, _ = chem.build_active_fps(run.known_actives)
-    sim, _ = chem.max_tanimoto(chem.fingerprint(mol), active_fps)
-    conf = chem._confidence(sim, lip)
+    prof = chem.similarity_profile(chem.fingerprint(mol), active_fps)
+    sim = prof["max_sim"]
+    s_like = {
+        "max_similarity": sim,
+        "top_k_avg": prof["top_k_avg"],
+        "qed": None,
+        "sa_score": chem.sa_score(mol),
+        "lipinski_violations": chem.lipinski_violations(d),
+        "n_pains_alerts": 0,
+    }
+    score = chem.compute_score(s_like)
+    conf = chem._confidence(score, sim, lip)
     if conf == "Low":
-        return {"verdict": "confidence Low", "similarity": sim}
+        return {"verdict": "confidence Low", "similarity": sim, "score": score}
 
     canonical = chem.Chem.MolToSmiles(mol)
     for r in run.ranked:
@@ -345,7 +520,9 @@ def _why_not(run, smiles: str) -> dict:
 
 def _similar_to(run, rank: int, k: int = 5) -> dict:
     if rank < 1 or rank > len(run.ranked):
-        raise ValueError(f"rank {rank} out of range — only {len(run.ranked)} ranked results exist")
+        raise ValueError(
+            f"rank {rank} out of range — only {len(run.ranked)} ranked results exist"
+        )
     target_smiles = run.ranked[rank - 1]["smiles"]
     target_mol = chem.parse(target_smiles)
     if target_mol is None:
@@ -368,47 +545,56 @@ def _similar_to(run, rank: int, k: int = 5) -> dict:
 # ---------------------------------------------------------- implementations --
 # (mutate — gate-only, preview-then-confirm)
 
-def _score_survivors(run, weights: dict, scaffold_pattern=None, scaffold_bonus: float = 0.15):
-    """Shared scoring pass for rerank/focus_scaffold. Mirrors tools._rank_survivors'
-    approach (same weighted-sum formula, same confidence gate, same reason text) —
-    reimplemented here rather than calling that function, since it writes run.ranked
-    unconditionally and we need a side-effect-free preview first."""
-    w_sim = weights.get("similarity", 0.6)
-    w_qed = weights.get("qed", 0.3)
-    w_pains = weights.get("pains", 0.1)
 
+def _score_survivors(
+    run, weights: dict, scaffold_pattern=None, scaffold_bonus: float = 0.15
+):
+    """Shared scoring pass for rerank/focus_scaffold. Uses chem.compute_score
+    (the same six-component formula the Critic's rank_survivors uses) and the
+    current three-arg chem._confidence(score, sim, lipinski_pass), so a chat
+    re-rank produces scores directly comparable to the pipeline's. Side-effect
+    free: builds and returns a candidate list without writing run.ranked."""
     scored = []
     matched_count = 0
     for s in run.survivors:
+        score = chem.compute_score(s, weights)  # handles qed=None internally
         sim = s["max_similarity"]
-        conf = chem._confidence(sim, s["lipinski_pass"])
-        if conf == "Low":
-            continue
-        score = w_sim * sim + w_qed * s["qed"] + w_pains * (0.0 if s["pains_flag"] else 1.0)
         matched = False
         if scaffold_pattern is not None:
             mol = chem.parse(s["smiles"])
             matched = mol is not None and mol.HasSubstructMatch(scaffold_pattern)
             if matched:
                 matched_count += 1
-                score += scaffold_bonus
-        idx = int(s["nearest_active"].split("#")[-1]) if "#" in s["nearest_active"] else -1
-        nearest = run.active_ids[idx] if 0 <= idx < len(run.active_ids) else s["nearest_active"]
-        reason = (
-            f"{sim:.2f} Tanimoto to {nearest} (known active); "
-            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski; "
-            f"{'no PAINS' if not s['pains_flag'] else 'PAINS flagged'}"
-            f"{'; matches scaffold' if matched else ''}."
+                score = round(min(1.0, score + scaffold_bonus), 3)
+        conf = chem._confidence(score, sim, s["lipinski_pass"])
+        if conf == "Low":
+            continue
+        idx = (
+            int(s["nearest_active"].split("#")[-1])
+            if "#" in s["nearest_active"]
+            else -1
+        )
+        nearest = (
+            run.active_ids[idx]
+            if 0 <= idx < len(run.active_ids)
+            else s["nearest_active"]
+        )
+        reason = chem._build_reason(s, score, nearest) + (
+            "; matches scaffold" if matched else ""
         )
         scored.append(
             {
                 "smiles": s["smiles"],
-                "score": round(min(score, 0.99), 3),
+                "score": score,
                 "confidence": conf,
                 "reason": reason,
                 "nearest_active": nearest,
                 "max_similarity": sim,
-                "is_known_active": bool(s.get("label")) if s.get("label") is not None else False,
+                "scaffold": s.get("scaffold", ""),
+                "sa_score": s.get("sa_score"),
+                "is_known_active": (
+                    bool(s.get("label")) if s.get("label") is not None else False
+                ),
             }
         )
     scored.sort(key=lambda r: r["score"], reverse=True)
@@ -422,7 +608,17 @@ def _score_survivors(run, weights: dict, scaffold_pattern=None, scaffold_bonus: 
 def _apply_ranked(run, new_ranked: list) -> None:
     run.ranked = new_ranked
     n_in = len(run.candidates)
-    emit(run, {"type": "funnel", "payload": {"input": n_in, "filtered": len(run.survivors), "ranked": len(new_ranked)}})
+    emit(
+        run,
+        {
+            "type": "funnel",
+            "payload": {
+                "input": n_in,
+                "filtered": len(run.survivors),
+                "ranked": len(new_ranked),
+            },
+        },
+    )
     emit(run, {"type": "ranked", "payload": new_ranked})
 
 
@@ -436,7 +632,9 @@ def _top20_diff(old_ranked: list, new_ranked: list) -> tuple:
 
 def _rerank(run, weights: dict = None, confirmed: bool = False) -> dict:
     if run.status != "awaiting_approval":
-        raise ValueError(f"rerank is only available at the approval gate (status={run.status!r})")
+        raise ValueError(
+            f"rerank is only available at the approval gate (status={run.status!r})"
+        )
     weights = weights or {}
     new_ranked, _ = _score_survivors(run, weights)
     entering, leaving = _top20_diff(run.ranked, new_ranked)
@@ -444,23 +642,26 @@ def _rerank(run, weights: dict = None, confirmed: bool = False) -> dict:
     if not confirmed:
         return {
             "preview": True,
-            "weights": {
-                "similarity": weights.get("similarity", 0.6),
-                "qed": weights.get("qed", 0.3),
-                "pains": weights.get("pains", 0.1),
-            },
+            "weights": {**chem.DEFAULT_WEIGHTS, **(weights or {})},
             "entering_top20": entering,
             "leaving_top20": leaving,
             "message": "Not applied. Call again with confirmed=true to commit.",
         }
 
     _apply_ranked(run, new_ranked)
-    return {"applied": True, "ranked_count": len(new_ranked), "entering_top20": entering, "leaving_top20": leaving}
+    return {
+        "applied": True,
+        "ranked_count": len(new_ranked),
+        "entering_top20": entering,
+        "leaving_top20": leaving,
+    }
 
 
 def _focus_scaffold(run, smarts: str, confirmed: bool = False) -> dict:
     if run.status != "awaiting_approval":
-        raise ValueError(f"focus_scaffold is only available at the approval gate (status={run.status!r})")
+        raise ValueError(
+            f"focus_scaffold is only available at the approval gate (status={run.status!r})"
+        )
     pattern = chem.Chem.MolFromSmarts(smarts)
     if pattern is None:
         raise ValueError(f"invalid SMARTS pattern: {smarts!r}")
@@ -489,7 +690,53 @@ def _focus_scaffold(run, smarts: str, confirmed: bool = False) -> dict:
     }
 
 
+def _diversify_shortlist(
+    run, mode: str = "scaffold", lam: float = 0.7, confirmed: bool = False
+) -> dict:
+    if run.status != "awaiting_approval":
+        raise ValueError(
+            f"diversify_shortlist is only available at the approval gate (status={run.status!r})"
+        )
+    if not run.ranked:
+        raise ValueError("no ranked shortlist to diversify yet")
+    if mode not in chem.DIVERSITY_MODES:
+        raise ValueError(
+            f"unknown mode {mode!r} — expected one of {list(chem.DIVERSITY_MODES)}"
+        )
+
+    new_ranked, stats = chem.diversify(
+        run.ranked, mode=mode, lam=lam, top_n=len(run.ranked)
+    )
+    entering, leaving = _top20_diff(run.ranked, new_ranked)
+
+    if not confirmed:
+        return {
+            "preview": True,
+            "mode": mode,
+            "lambda": stats["lambda"],
+            "distinct_scaffolds": stats["n_scaffolds"],
+            "n_clusters": stats["n_clusters"],
+            "entering_top20": entering,
+            "leaving_top20": leaving,
+            "message": "Not applied. Call again with confirmed=true to commit.",
+        }
+
+    _apply_ranked(run, new_ranked)
+    run.diversity_stats = stats
+    emit(run, {"type": "diversity", "payload": stats})
+    return {
+        "applied": True,
+        "mode": mode,
+        "distinct_scaffolds": stats["n_scaffolds"],
+        "n_clusters": stats["n_clusters"],
+        "ranked_count": len(new_ranked),
+        "entering_top20": entering,
+        "leaving_top20": leaving,
+    }
+
+
 # ------------------------------------------------------------------ dispatch --
+
 
 async def execute_chat_tool(run, name: str, args: dict) -> dict:
     """Dispatch a chat-tool call by name. Network/CPU-bound read-only work runs
@@ -507,6 +754,12 @@ async def execute_chat_tool(run, name: str, args: dict) -> dict:
         return _get_molecule(run, **args)
     if name == "get_dossier":
         return _get_dossier(run)
+    if name == "get_funnel_breakdown":
+        return _get_funnel_breakdown(run)
+    if name == "get_scaffold_summary":
+        return _get_scaffold_summary(run)
+    if name == "get_metric":
+        return _get_metric(run)
     if name == "explain":
         return _explain(run, **args)
     if name == "why_not":
@@ -517,4 +770,6 @@ async def execute_chat_tool(run, name: str, args: dict) -> dict:
         return _rerank(run, **args)
     if name == "focus_scaffold":
         return _focus_scaffold(run, **args)
+    if name == "diversify_shortlist":
+        return _diversify_shortlist(run, **args)
     raise ValueError(f"unknown chat tool: {name!r}")

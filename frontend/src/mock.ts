@@ -5,18 +5,20 @@ import type { Citation, LogEvent, RankedMol } from "./types";
 
 export interface StreamEvent {
   type:
-    | "agent_start"
-    | "agent_done"
-    | "log"
-    | "target_resolved"
-    | "funnel"
-    | "dossier_token"
-    | "citations"
-    | "ranked"
-    | "metric"
-    | "tool_call"
-    | "steer"
-    | "awaiting_approval";
+  | "agent_start"
+  | "agent_done"
+  | "log"
+  | "target_resolved"
+  | "funnel"
+  | "dossier_token"
+  | "citations"
+  | "grounding"
+  | "ranked"
+  | "metric"
+  | "diversity"
+  | "tool_call"
+  | "steer"
+  | "awaiting_approval";
   agent?: LogEvent["agent"];
   payload?: any;
 }
@@ -202,6 +204,15 @@ export async function runMockStream(
     await wait(38);
   }
   emit({ type: "citations", payload: CITATIONS });
+  emit({
+    type: "grounding",
+    payload: {
+      cited_pmids: ["15737014", "16729045"],
+      provided_pmids: ["15737014", "16729045"],
+      ungrounded: [],
+      all_grounded: true,
+    },
+  });
   emit({ type: "agent_done", agent: "knowledge" });
   await wait(300);
 
@@ -334,6 +345,29 @@ export async function runMockStream(
     payload: { recovered: 8, total_actives: 10, top_n: 20, screened: 1500 },
   });
   emit({ type: "agent_done", agent: "critic" });
+  await wait(300);
+
+  // 5 — diversifier: re-selects the shortlist for chemotype spread (scaffold
+  // mode here). Mirrors the live backend's Diversifier agent.
+  emit({ type: "agent_start", agent: "diversifier" });
+  emit({
+    type: "log",
+    agent: "diversifier",
+    payload: "Re-selecting shortlist for chemotype diversity — mode=scaffold…",
+  });
+  await wait(600);
+  emit({
+    type: "diversity",
+    payload: { mode: "scaffold", lambda: 0.7, n_selected: 10, n_scaffolds: 7, n_clusters: null },
+  });
+  emit({ type: "ranked", payload: RANKED });
+  emit({
+    type: "log",
+    agent: "diversifier",
+    payload: "Diversified: 7 distinct scaffolds across top 10.",
+  });
+  await wait(300);
+  emit({ type: "agent_done", agent: "diversifier" });
   await wait(300);
   emit({ type: "awaiting_approval" });
 }

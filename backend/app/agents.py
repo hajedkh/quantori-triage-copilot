@@ -366,3 +366,107 @@ async def critic(run):
         emit(run, {"type": "metric", "payload": metric})
 
     emit(run, {"type": "agent_done", "agent": "critic"})
+
+
+# ---------------- Diversifier ----------------
+# A separate agent under the supervisor that runs after the Critic. It takes
+# the ranked shortlist and re-selects it for chemotype diversity using the
+# mode the operator chose up front (run.diversify_mode / diversify_lambda,
+# set from the setup form). The chat copilot's diversify_shortlist tool lets
+# the operator re-run this interactively at the approval gate with a different
+# mode or MMR lambda — same chem.diversify() underneath.
+async def diversifier(run):
+    emit(run, {"type": "agent_start", "agent": "diversifier"})
+
+    mode = (getattr(run, "diversify_mode", "scaffold") or "scaffold").lower()
+    lam = getattr(run, "diversify_lambda", 0.7)
+
+    if mode not in chem.DIVERSITY_MODES:
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "diversifier",
+                "payload": f"Unknown diversity mode {mode!r} — falling back to scaffold.",
+            },
+        )
+        mode = "scaffold"
+
+    if not run.ranked:
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "diversifier",
+                "payload": "No ranked shortlist to diversify — skipping.",
+            },
+        )
+        emit(run, {"type": "agent_done", "agent": "diversifier"})
+        return
+
+    if mode == "off":
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "diversifier",
+                "payload": "Diversity pass disabled by operator — keeping pure score order.",
+            },
+        )
+    else:
+        detail = f", λ={lam}" if mode == "mmr" else ""
+        emit(
+            run,
+            {
+                "type": "log",
+                "agent": "diversifier",
+                "payload": f"Re-selecting shortlist for chemotype diversity — mode={mode}{detail}…",
+            },
+        )
+
+    new_ranked, stats = chem.diversify(
+        run.ranked, mode=mode, lam=lam, top_n=len(run.ranked)
+    )
+    run.ranked = new_ranked
+    run.diversity_stats = stats
+
+    emit(run, {"type": "diversity", "payload": stats})
+    emit(run, {"type": "ranked", "payload": new_ranked})
+
+    n_in = len(run.candidates)
+    emit(
+        run,
+        {
+            "type": "funnel",
+            "payload": {
+                "input": n_in,
+                "filtered": len(run.survivors),
+                "ranked": len(new_ranked),
+            },
+        },
+    )
+
+    # Recompute the validation metric — which known actives survive can shift
+    # once the set is re-selected for diversity.
+    total_actives = sum(1 for c in run.candidates if c.get("label"))
+    if total_actives > 0:
+        recovered = sum(1 for r in new_ranked if r.get("is_known_active"))
+        metric = {
+            "recovered": recovered,
+            "total_actives": total_actives,
+            "top_n": len(new_ranked),
+            "screened": n_in,
+        }
+        run.metric = metric
+        emit(run, {"type": "metric", "payload": metric})
+
+    if mode == "off":
+        summary = f"Kept top {stats['n_selected']} by score ({stats['n_scaffolds'] or '?'} scaffolds)."
+    else:
+        cl = f" · {stats['n_clusters']} clusters" if stats.get("n_clusters") else ""
+        summary = (
+            f"Diversified: {stats['n_scaffolds'] or '?'} distinct scaffolds "
+            f"across top {stats['n_selected']}{cl}."
+        )
+    emit(run, {"type": "log", "agent": "diversifier", "payload": summary})
+    emit(run, {"type": "agent_done", "agent": "diversifier"})

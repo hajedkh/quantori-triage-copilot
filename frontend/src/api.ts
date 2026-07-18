@@ -54,14 +54,16 @@ export async function getLLMHealth(provider: LLMProvider): Promise<LLMHealthResu
   return res.json();
 }
 
-// POST /run  (multipart: target_name + candidates.csv) -> { run_id }
+// POST /run  (multipart: target_name + candidates.csv + diversify) -> { run_id }
 export async function startRun(
   targetName: string,
-  file: File
+  file: File,
+  diversify: string = "scaffold"
 ): Promise<StartResult> {
   const fd = new FormData();
   fd.append("target_name", targetName);
   fd.append("candidates", file);
+  fd.append("diversify", diversify);
   const res = await fetch("/api/run", { method: "POST", body: fd });
   if (!res.ok) throw new Error(`start failed: ${res.status}`);
   const data = await res.json();
@@ -165,7 +167,7 @@ export async function askChat(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  for (;;) {
+  for (; ;) {
     const { done, value } = await reader.read();
     if (done) break;
     // The actual wire format is CRLF ("\r\n\r\n" between frames) even though

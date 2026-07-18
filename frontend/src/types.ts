@@ -1,6 +1,6 @@
 // Types mirror the backend AppState (see HLD section 5).
 
-export type AgentId = "supervisor" | "knowledge" | "cheminformatics" | "critic";
+export type AgentId = "supervisor" | "knowledge" | "cheminformatics" | "critic" | "diversifier";
 export type AgentStatus = "idle" | "running" | "done";
 export type Confidence = "High" | "Medium" | "Low";
 export type RunStatus =
@@ -46,6 +46,25 @@ export interface Metric {
   screened: number;
 }
 
+// Chemotype-diversity selection applied by the Diversifier agent.
+export type DiversityMode = "off" | "scaffold" | "mmr" | "cluster";
+
+export interface DiversityStats {
+  mode: DiversityMode;
+  lambda: number;
+  n_selected: number;
+  n_scaffolds: number | null;
+  n_clusters: number | null;
+}
+
+// Citation-grounding report from the Knowledge agent's dossier build.
+export interface Grounding {
+  cited_pmids: string[];
+  provided_pmids?: string[];
+  ungrounded: { pmid: string; reason?: string }[];
+  all_grounded?: boolean;
+}
+
 // A single step of an agentic tool-calling loop (cheminformatics/critic).
 // iteration: -1 marks the loop-summary event (tool is null, result_summary
 // carries the token count) rather than an actual tool execution.
@@ -68,6 +87,8 @@ export interface RunState {
   citations: Citation[];
   ranked: RankedMol[];
   metric: Metric | null;
+  grounding: Grounding | null;
+  diversity: DiversityStats | null;
   log: LogEvent[];
   targetName: string;
   targetId: string;

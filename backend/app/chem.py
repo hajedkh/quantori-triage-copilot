@@ -681,6 +681,191 @@ def diversity_rerank(scored: list[dict], top_n: int) -> list[dict]:
     return picked
 
 
+# ---------------------------------------------------------- diversification --
+# These operate on an already-scored/ranked list (each row carries "smiles",
+# "score", and usually "scaffold") and re-select/re-order it for chemotype
+# diversity. They never invent scores — only which rows survive and in what
+# order changes. Used by the Diversifier agent (agents.py) and the chat
+# copilot's diversify_shortlist tool (chat_tools.py).
+
+
+def _fps_for_rows(rows: list[dict]) -> list:
+    """Morgan fingerprint per row (None where the SMILES won't parse)."""
+    out = []
+    for r in rows:
+        m = parse(r["smiles"])
+        out.append(fingerprint(m) if m is not None else None)
+    return out
+
+
+def mmr_select(rows: list[dict], top_n: int, lam: float = 0.7) -> list[dict]:
+    """Maximal Marginal Relevance selection.
+
+    Greedily picks the row maximizing
+        lam * norm_score(i)  -  (1 - lam) * max Tanimoto(i, already_picked)
+    so high lam favours quality (pure score) and low lam favours spread.
+    Scores are min-max normalized only for the trade-off; the row's own
+    "score" field is left untouched.
+    """
+    if not rows:
+        return []
+    lam = max(0.0, min(1.0, lam))
+    fps = _fps_for_rows(rows)
+    scores = [r.get("score", 0.0) or 0.0 for r in rows]
+    smax = max(scores) or 1.0
+    norm = [s / smax for s in scores]
+
+    pool = list(range(len(rows)))
+    chosen: list[int] = []
+    chosen_fps: list = []
+    while pool and len(chosen) < top_n:
+        best_i, best_val = pool[0], None
+        for i in pool:
+            if chosen_fps and fps[i] is not None:
+                redundancy = max(DataStructs.BulkTanimotoSimilarity(fps[i], chosen_fps))
+            else:
+                redundancy = 0.0
+            val = lam * norm[i] - (1.0 - lam) * redundancy
+            if best_val is None or val > best_val:
+                best_val, best_i = val, i
+        chosen.append(best_i)
+        if fps[best_i] is not None:
+            chosen_fps.append(fps[best_i])
+        pool.remove(best_i)
+    return [rows[i] for i in chosen]
+
+
+def butina_clusters(smiles_list: list[str], cutoff: float = 0.35) -> list[int]:
+    """Butina cluster ids aligned 1:1 with smiles_list (-1 = unparseable).
+
+    cutoff is a Tanimoto *distance* (1 - similarity): 0.35 groups molecules
+    that are >= 0.65 similar. Clusters are numbered by descending size, as
+    RDKit's Butina returns them.
+    """
+    from rdkit.ML.Cluster import Butina
+
+    fps, idx_map = [], []
+    for i, smi in enumerate(smiles_list):
+        m = parse(smi)
+        if m is not None:
+            fps.append(fingerprint(m))
+            idx_map.append(i)
+
+    labels = [-1] * len(smiles_list)
+    n = len(fps)
+    if n == 0:
+        return labels
+
+    # Condensed lower-triangle distance matrix, as Butina expects.
+    dists: list[float] = []
+    for i in range(1, n):
+        sims = DataStructs.BulkTanimotoSimilarity(fps[i], fps[:i])
+        dists.extend(1.0 - s for s in sims)
+
+    clusters = Butina.ClusterData(dists, n, cutoff, isDistData=True)
+    for cid, members in enumerate(clusters):
+        for m in members:
+            labels[idx_map[m]] = cid
+    return labels
+
+
+def cluster_pick(
+    rows: list[dict], top_n: int, cutoff: float = 0.35
+) -> tuple[list[dict], int]:
+    """Butina-cluster the rows, then round-robin the best-scoring member of
+    each cluster (clusters ordered by their best score) until top_n is full.
+    Returns (selected_rows, n_clusters)."""
+    if not rows:
+        return [], 0
+    from collections import defaultdict
+
+    labels = butina_clusters([r["smiles"] for r in rows], cutoff)
+    buckets: dict[int, list[int]] = defaultdict(list)
+    for i, lab in enumerate(labels):
+        buckets[lab].append(i)  # rows already score-sorted, so each bucket is too
+
+    order = sorted(
+        buckets.keys(),
+        key=lambda c: max(rows[i].get("score", 0.0) or 0.0 for i in buckets[c]),
+        reverse=True,
+    )
+    pointers = {c: 0 for c in order}
+    picked: list[int] = []
+    while len(picked) < top_n:
+        progressed = False
+        for c in order:
+            p = pointers[c]
+            if p < len(buckets[c]):
+                picked.append(buckets[c][p])
+                pointers[c] += 1
+                progressed = True
+                if len(picked) >= top_n:
+                    break
+        if not progressed:
+            break
+    return [rows[i] for i in picked], len(buckets)
+
+
+def _renumber(rows: list[dict]) -> list[dict]:
+    for i, r in enumerate(rows, 1):
+        r["rank"] = i
+    return rows
+
+
+def _diversity_stats(rows: list[dict], mode: str, lam: float, n_clusters=None) -> dict:
+    scaffolds = {r.get("scaffold", "") for r in rows if r.get("scaffold")}
+    return {
+        "mode": mode,
+        "lambda": round(lam, 2),
+        "n_selected": len(rows),
+        "n_scaffolds": len(scaffolds) if scaffolds else None,
+        "n_clusters": n_clusters,
+    }
+
+
+DIVERSITY_MODES = ("off", "scaffold", "mmr", "cluster")
+
+
+def diversify(
+    rows: list[dict],
+    mode: str = "scaffold",
+    lam: float = 0.7,
+    top_n: int | None = None,
+    cutoff: float = 0.35,
+) -> tuple[list[dict], dict]:
+    """Re-order/select an already-ranked shortlist for chemotype diversity.
+
+    mode:
+      - "off":      pure score order (no diversity applied)
+      - "scaffold": Bemis-Murcko scaffold round-robin (chem.diversity_rerank)
+      - "mmr":      maximal marginal relevance with `lam`
+      - "cluster":  Butina cluster round-robin at distance `cutoff`
+
+    Returns (new_rows, stats). Rows are re-numbered 1..N. Input is copied by
+    reference; callers pass run.ranked and reassign it to the result.
+    """
+    if mode not in DIVERSITY_MODES:
+        raise ValueError(
+            f"unknown diversify mode {mode!r} — expected one of {DIVERSITY_MODES}"
+        )
+    if top_n is None:
+        top_n = len(rows)
+
+    ordered = sorted(rows, key=lambda r: r.get("score", 0.0) or 0.0, reverse=True)
+    n_clusters = None
+
+    if not ordered or mode == "off":
+        out = ordered[:top_n]
+    elif mode == "scaffold":
+        out = diversity_rerank(ordered, top_n)
+    elif mode == "mmr":
+        out = mmr_select(ordered, top_n, lam)
+    else:  # cluster
+        out, n_clusters = cluster_pick(ordered, top_n, cutoff)
+
+    return _renumber(out), _diversity_stats(out, mode, lam, n_clusters)
+
+
 def canonical(smiles: str) -> str | None:
     """Canonicalize a SMILES string. Returns None if unparseable."""
     mol = parse(smiles)

@@ -53,6 +53,11 @@ async def critic_node(state: GState):
     return {}
 
 
+async def diversifier_node(state: GState):
+    await agents.diversifier(_run(state))
+    return {}
+
+
 async def human_gate_node(state: GState):
     run = _run(state)
     run.status = "awaiting_approval"
@@ -76,6 +81,7 @@ async def export_node(state: GState):
         run.metric,
         screen_stats=run.screen_stats,
         grounding=run.grounding,
+        provenance=run.provenance,
     )
     run.status = "exported"
     return {}
@@ -87,6 +93,7 @@ def build_graph():
     g.add_node("knowledge", knowledge_node)
     g.add_node("cheminformatics", cheminformatics_node)
     g.add_node("critic", critic_node)
+    g.add_node("diversifier", diversifier_node)
     g.add_node("human_gate", human_gate_node)
     g.add_node("export", export_node)
 
@@ -94,7 +101,8 @@ def build_graph():
     g.add_edge("supervisor", "knowledge")
     g.add_edge("knowledge", "cheminformatics")
     g.add_edge("cheminformatics", "critic")
-    g.add_edge("critic", "human_gate")
+    g.add_edge("critic", "diversifier")
+    g.add_edge("diversifier", "human_gate")
     g.add_edge("human_gate", "export")
     g.add_edge("export", END)
 
@@ -143,19 +151,25 @@ async def resume(run_id: str):
     still defined but no longer reached.
     """
     run = RUNS[run_id]
+    import asyncio
     from pathlib import Path
 
     runs_dir = Path(__file__).resolve().parent.parent / "runs"
     try:
-        export.export_all(
+        # Offload the CPU-bound export (SDF 3D embedding, CSV/report writing)
+        # to a worker thread so it doesn't block the event loop while the
+        # /approve request is in flight.
+        await asyncio.to_thread(
+            export.export_all,
             runs_dir / run.id,
             run.target_name,
             run.dossier,
             run.citations,
             run.ranked,
             run.metric,
-            screen_stats=run.screen_stats,
-            grounding=run.grounding,
+            run.screen_stats,
+            run.grounding,
+            run.provenance,
         )
     except Exception:
         # Surfaces as a 500 to the /approve caller; log the traceback so the

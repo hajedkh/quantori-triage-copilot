@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { BookOpen, FlaskConical, ListChecks, Compass } from "lucide-react";
+import { BookOpen, FlaskConical, ListChecks, Compass, Shuffle } from "lucide-react";
 import type { AgentId, AgentStatus, FunnelState, LogEvent, Metric, ToolCallEvent } from "../types";
 import FunnelMeter from "./FunnelMeter";
 import BrandSpinner from "./BrandSpinner";
@@ -17,6 +17,7 @@ const AGENTS: { id: AgentId; name: string; role: string; icon: JSX.Element }[] =
   { id: "knowledge", name: "Knowledge", role: "cited dossier · actives", icon: <BookOpen size={16} /> },
   { id: "cheminformatics", name: "Cheminformatics", role: "RDKit filters · similarity", icon: <FlaskConical size={16} /> },
   { id: "critic", name: "Critic / Ranking", role: "score · confidence", icon: <ListChecks size={16} /> },
+  { id: "diversifier", name: "Diversifier", role: "chemotype spread", icon: <Shuffle size={16} /> },
 ];
 
 export default function PipelineRail({ agents, funnel, metric, log, toolTrace }: Props) {
