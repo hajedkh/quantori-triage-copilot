@@ -54,6 +54,7 @@ export default function App() {
   const [mode, setMode] = useState<"mock" | "live">("live");
   const [target, setTarget] = useState("EGFR");
   const [file, setFile] = useState<File | null>(null);
+  const [startRankingProfile, setStartRankingProfile] = useState<RankingProfile>("balanced");
   const [tab, setTab] = useState<"dossier" | "shortlist">("dossier");
   const [run, setRun] = useState<RunState>(EMPTY);
   const [llmHealth, setLlmHealth] = useState<LLMHealth>({
@@ -69,6 +70,13 @@ export default function App() {
   const [chatAudit, setChatAudit] = useState<ChatMessage[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [dossierTokenCount, setDossierTokenCount] = useState(0);
+  // The Diversifier's own agent_start/agent_done pair fires almost instantly
+  // (it's a synchronous RDKit re-selection, no LLM call) — far faster than
+  // the SSE stream reconnect after POST /diversify, so relying on that pair
+  // alone made the card flash "done" before "running" was ever visible. This
+  // tracks the whole rerun request (diversify -> re-screen -> re-rank), not
+  // just the Diversifier's own quick sub-step.
+  const [diversifying, setDiversifying] = useState(false);
 
   // The chat is present from the very first screen, so it needs a run_id
   // before any target/library/pipeline exists.
@@ -161,6 +169,9 @@ export default function App() {
     // The chat's steer messages are only "confirmed" once this event lands
     // on the pipeline's own SSE stream — see ChatPanel's pendingSteer.
     if (e.type === "steer") setLastSteerAck({ message: e.payload, ts: Date.now() });
+    // Marks the end of any pass through the gate — the original run or a
+    // diversify rerun — so this is also the right place to clear the flag.
+    if (e.type === "awaiting_approval") setDiversifying(false);
   }, []);
 
   const start = useCallback(async () => {
@@ -182,7 +193,7 @@ export default function App() {
     } else {
       try {
         if (!file) throw new Error("Select a candidate CSV for live mode.");
-        const { runId } = await startRun(target, file);
+        const { runId } = await startRun(target, file, startRankingProfile);
         runIdRef.current = runId;
         unsubRef.current = subscribe(runId, apply);
         // Point the chat at whichever run is actually live, regardless of
@@ -196,7 +207,7 @@ export default function App() {
         }));
       }
     }
-  }, [mode, target, file, apply]);
+  }, [mode, target, file, startRankingProfile, apply]);
 
   const onCiteRank = useCallback((rank: number) => {
     setTab("shortlist");
@@ -232,11 +243,13 @@ export default function App() {
   const runDiversifyLoop = useCallback(async (req: DiversifyRequest) => {
     if (mode !== "live" || !runIdRef.current) return;
     if (unsubRef.current) unsubRef.current();
+    setDiversifying(true);
     setRun((s) => ({ ...s, status: "running" }));
     try {
       await diversifyRun(runIdRef.current, req);
       unsubRef.current = subscribe(runIdRef.current, apply);
     } catch (err) {
+      setDiversifying(false);
       setRun((s) => ({
         ...s,
         status: "error",
@@ -377,6 +390,8 @@ export default function App() {
             onTarget={setTarget}
             file={file}
             onFile={setFile}
+            rankingProfile={startRankingProfile}
+            onRankingProfile={setStartRankingProfile}
             onRun={start}
             disabled={run.status === "running" || llmBlocked}
             disabledReason={runDisabledReason}
@@ -394,6 +409,8 @@ export default function App() {
                 diversity={run.diversity}
                 log={run.log}
                 toolTrace={run.toolTrace}
+                fullTrace={run.fullTrace}
+                diversifying={diversifying}
               />
               <OutputTabs
                 tab={tab}

@@ -136,13 +136,8 @@ export default function ApproveBar({
           {!exported ? (
             <>
               {!approving && (
-                <button
-                  className="btn"
-                  onClick={() => setOpen(true)}
-                  disabled={!canDiversify || busy || approving}
-                  title={canDiversify ? undefined : "Diversification rerun is available in live mode"}
-                >
-                  Diversify &amp; rerun
+                <button className="btn primary" onClick={submitApprove} disabled={busy || approving}>
+                  <Check size={15} strokeWidth={2.5} /> Approve &amp; export
                 </button>
               )}
             </>
@@ -179,8 +174,13 @@ export default function ApproveBar({
                 <option value="strict">Strict (drug-likeness penalties)</option>
               </select>
             </label>
-            <button className="btn primary" onClick={submitApprove} disabled={busy || approving}>
-              <Check size={15} strokeWidth={2.5} /> Approve &amp; export
+            <button
+              className="btn"
+              onClick={() => setOpen(true)}
+              disabled={!canDiversify || busy || approving}
+              title={canDiversify ? undefined : "Diversification rerun is available in live mode"}
+            >
+              Diversify &amp; rerun
             </button>
           </div>
         )}

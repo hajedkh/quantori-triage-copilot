@@ -60,14 +60,16 @@ export async function getLLMHealth(provider: LLMProvider): Promise<LLMHealthResu
   return res.json();
 }
 
-// POST /run  (multipart: target_name + candidates.csv) -> { run_id }
+// POST /run  (multipart: target_name + candidates.csv [+ ranking_profile]) -> { run_id }
 export async function startRun(
   targetName: string,
-  file: File
+  file: File,
+  rankingProfile?: RankingProfile
 ): Promise<StartResult> {
   const fd = new FormData();
   fd.append("target_name", targetName);
   fd.append("candidates", file);
+  if (rankingProfile) fd.append("ranking_profile", rankingProfile);
   const res = await fetch("/api/run", { method: "POST", body: fd });
   if (!res.ok) throw new Error(`start failed: ${res.status}`);
   const data = await res.json();
