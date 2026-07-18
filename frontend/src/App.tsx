@@ -6,26 +6,49 @@ import OutputTabs from "./components/OutputTabs";
 import ApproveBar from "./components/ApproveBar";
 import ChatPanel from "./components/ChatPanel";
 import { runMockStream, buildCsv, type StreamEvent } from "./mock";
-import { startRun, subscribe, approveRun, downloadUrl, createSession } from "./api";
-import type { AgentId, RunState, LLMHealth } from "./types";
+import {
+  startRun,
+  subscribe,
+  approveRun,
+  diversifyRun,
+  rerankRun,
+  downloadUrl,
+  createSession,
+} from "./api";
+import type {
+  AgentId,
+  RunState,
+  LLMHealth,
+  DiversifyRequest,
+  RankingProfile,
+  ChatMessage,
+} from "./types";
 
 const EMPTY: RunState = {
   status: "idle",
-  agents: { supervisor: "idle", knowledge: "idle", cheminformatics: "idle", critic: "idle" },
+  agents: { supervisor: "idle", knowledge: "idle", cheminformatics: "idle", critic: "idle", diversifier: "idle" },
   activeAgent: null,
-  funnel: { input: 0, filtered: null, ranked: null },
+  funnel: { input: 0, filtered: null, ranked: null, diversified_added: 0 },
   dossier: "",
   citations: [],
   ranked: [],
   metric: null,
+  grounding: null,
+  diversity: null,
   log: [],
   targetName: "",
   targetId: "",
-  toolTrace: { supervisor: [], knowledge: [], cheminformatics: [], critic: [] },
-  fullTrace: { supervisor: [], knowledge: [], cheminformatics: [], critic: [] },
+  toolTrace: { supervisor: [], knowledge: [], cheminformatics: [], critic: [], diversifier: [] },
+  fullTrace: { supervisor: [], knowledge: [], cheminformatics: [], critic: [], diversifier: [] },
+  exportProgress: null,
 };
 
 const TRACE_CAP = 8;
+
+interface AuditEvent {
+  ts: number;
+  event: StreamEvent;
+}
 
 export default function App() {
   const [mode, setMode] = useState<"mock" | "live">("live");
@@ -43,6 +66,9 @@ export default function App() {
   const unsubRef = useRef<(() => void) | null>(null);
   const [chatRunId, setChatRunId] = useState<string | null>(null);
   const [lastSteerAck, setLastSteerAck] = useState<{ message: string; ts: number } | null>(null);
+  const [chatAudit, setChatAudit] = useState<ChatMessage[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [dossierTokenCount, setDossierTokenCount] = useState(0);
 
   // The chat is present from the very first screen, so it needs a run_id
   // before any target/library/pipeline exists.
@@ -62,6 +88,12 @@ export default function App() {
 
   // Single event handler for both mock and live streams.
   const apply = useCallback((e: StreamEvent) => {
+    if (e.type === "dossier_token") {
+      setDossierTokenCount((n) => n + 1);
+    } else {
+      setAuditEvents((prev) => [...prev, { ts: Date.now(), event: e }]);
+    }
+
     setRun((s) => {
       const next = { ...s };
       switch (e.type) {
@@ -91,6 +123,12 @@ export default function App() {
         case "metric":
           next.metric = e.payload;
           break;
+        case "grounding":
+          next.grounding = e.payload;
+          break;
+        case "diversity":
+          next.diversity = e.payload;
+          break;
         case "log":
           next.log = [
             ...s.log,
@@ -111,6 +149,9 @@ export default function App() {
           next.fullTrace = { ...s.fullTrace, [agentId]: [...prevFull, e.payload] };
           break;
         }
+        case "export_progress":
+          next.exportProgress = e.payload;
+          break;
       }
       return next;
     });
@@ -125,7 +166,15 @@ export default function App() {
   const start = useCallback(async () => {
     // reset
     if (unsubRef.current) unsubRef.current();
-    setRun({ ...EMPTY, status: "running", targetName: target, funnel: { input: 0, filtered: null, ranked: null } });
+    setAuditEvents([]);
+    setChatAudit([]);
+    setDossierTokenCount(0);
+    setRun({
+      ...EMPTY,
+      status: "running",
+      targetName: target,
+      funnel: { input: 0, filtered: null, ranked: null, diversified_added: 0 },
+    });
     setTab("dossier");
 
     if (mode === "mock") {
@@ -161,15 +210,49 @@ export default function App() {
     }, 50);
   }, []);
 
-  const approve = useCallback(async () => {
+  const approve = useCallback(async (rankingProfile: RankingProfile) => {
     if (mode === "live" && runIdRef.current) {
       try {
-        await approveRun(runIdRef.current);
-      } catch {
-        /* surfaced below via status */
+        if (unsubRef.current) unsubRef.current();
+        unsubRef.current = subscribe(runIdRef.current, apply);
+        setRun((s) => ({ ...s, exportProgress: { stage: "start", message: "Starting export." } }));
+        await approveRun(runIdRef.current, rankingProfile);
+      } catch (err) {
+        setRun((s) => ({
+          ...s,
+          status: "error",
+          log: [...s.log, { ts: Date.now(), agent: "supervisor", msg: String(err) }],
+        }));
+        return;
       }
     }
     setRun((s) => ({ ...s, status: "exported" }));
+  }, [mode]);
+
+  const runDiversifyLoop = useCallback(async (req: DiversifyRequest) => {
+    if (mode !== "live" || !runIdRef.current) return;
+    if (unsubRef.current) unsubRef.current();
+    setRun((s) => ({ ...s, status: "running" }));
+    try {
+      await diversifyRun(runIdRef.current, req);
+      unsubRef.current = subscribe(runIdRef.current, apply);
+    } catch (err) {
+      setRun((s) => ({
+        ...s,
+        status: "error",
+        log: [...s.log, { ts: Date.now(), agent: "supervisor", msg: String(err) }],
+      }));
+    }
+  }, [mode, apply]);
+
+  const rerankAtGate = useCallback(async (rankingProfile: RankingProfile) => {
+    if (mode !== "live" || !runIdRef.current) return;
+    const data = await rerankRun(runIdRef.current, rankingProfile);
+    setRun((s) => ({
+      ...s,
+      ranked: data.ranked,
+      funnel: { ...s.funnel, ranked: data.ranked.length },
+    }));
   }, [mode]);
 
   const download = useCallback(
@@ -178,16 +261,49 @@ export default function App() {
       // over SSE in both modes) — no backend round-trip either way, unlike
       // csv/sdf/report which are files the backend writes on approval.
       if (kind === "traces") {
+        const chronological_tools = auditEvents
+          .filter((x) => x.event.type === "tool_call")
+          .map((x) => ({
+            ts: x.ts,
+            type: x.event.type,
+            agent: x.event.agent ?? null,
+            payload: x.event.payload ?? null,
+          }));
+
         const payload = {
-          target: run.targetName,
+          schema_version: "audit-trail.v1",
           generated_at: new Date().toISOString(),
-          agents: run.fullTrace,
+          run: {
+            run_id: runIdRef.current,
+            chat_run_id: chatRunId,
+            mode,
+            status: run.status,
+            target_name: run.targetName,
+            target_id: run.targetId,
+            funnel: run.funnel,
+            metric: run.metric,
+            diversity: run.diversity,
+            llm_health: llmHealth,
+            last_steer_ack: lastSteerAck,
+          },
+          audit_summary: {
+            events_count: auditEvents.length,
+            tool_calls_count: chronological_tools.length,
+            chat_messages_count: chatAudit.length,
+            dossier_tokens_received: dossierTokenCount,
+          },
+          timeline: auditEvents,
+          tool_calls_chronological: chronological_tools,
+          chat_history: chatAudit,
+          pipeline_logs: run.log,
+          citations: run.citations,
+          tool_trace_by_agent: run.fullTrace,
         };
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${run.targetName || "target"}_traces.json`;
+        a.download = `${run.targetName || "target"}_audit_trail.json`;
         a.click();
         URL.revokeObjectURL(url);
         return;
@@ -209,7 +325,25 @@ export default function App() {
         alert(`${kind.toUpperCase()} export is produced by the backend in live mode.`);
       }
     },
-    [mode, run.ranked, run.targetName, run.fullTrace]
+    [
+      mode,
+      auditEvents,
+      chatAudit,
+      chatRunId,
+      dossierTokenCount,
+      lastSteerAck,
+      llmHealth,
+      run.citations,
+      run.diversity,
+      run.funnel,
+      run.fullTrace,
+      run.log,
+      run.metric,
+      run.ranked,
+      run.status,
+      run.targetId,
+      run.targetName,
+    ]
   );
 
   // Logo/title in the header — abandons the client-side view of the current
@@ -230,8 +364,8 @@ export default function App() {
     run.status === "running"
       ? undefined
       : llmBlocked
-      ? `LLM provider is down${llmHealth.error ? " — " + llmHealth.error : ""}. Fix the provider or switch to DEMO mode.`
-      : undefined;
+        ? `LLM provider is down${llmHealth.error ? " — " + llmHealth.error : ""}. Fix the provider or switch to DEMO mode.`
+        : undefined;
 
   return (
     <>
@@ -257,6 +391,7 @@ export default function App() {
                 agents={run.agents}
                 funnel={run.funnel}
                 metric={run.metric}
+                diversity={run.diversity}
                 log={run.log}
                 toolTrace={run.toolTrace}
               />
@@ -267,6 +402,8 @@ export default function App() {
                 citations={run.citations}
                 dossierStreaming={dossierStreaming}
                 ranked={run.ranked}
+                grounding={run.grounding}
+                diversity={run.diversity}
               />
             </div>
 
@@ -274,7 +411,11 @@ export default function App() {
               <ApproveBar
                 exported={run.status === "exported"}
                 onApprove={approve}
+                onDiversify={runDiversifyLoop}
+                onRankingProfileChange={rerankAtGate}
+                canDiversify={mode === "live"}
                 onDownload={download}
+                exportProgress={run.exportProgress}
               />
             )}
           </>
@@ -287,6 +428,7 @@ export default function App() {
           status={run.status}
           lastSteerAck={lastSteerAck}
           onCiteRank={onCiteRank}
+          onHistoryChange={setChatAudit}
           docked={!started}
         />
       </main>

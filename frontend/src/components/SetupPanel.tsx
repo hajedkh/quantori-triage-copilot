@@ -62,8 +62,8 @@ export default function SetupPanel({
               {file
                 ? `${file.name} · ${(file.size / 1024).toFixed(0)} KB`
                 : mode === "mock"
-                ? "egfr_candidates.csv · 1,500 molecules"
-                : "No file selected"}
+                  ? "egfr_candidates.csv · 1,500 molecules"
+                  : "No file selected"}
             </span>
             {file ? (
               <button className="link" onClick={() => onFile(null)}>

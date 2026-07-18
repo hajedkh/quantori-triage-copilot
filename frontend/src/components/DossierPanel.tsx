@@ -1,11 +1,12 @@
-import { Sparkles } from "lucide-react";
-import type { Citation } from "../types";
+import { Sparkles, ShieldCheck, ShieldAlert } from "lucide-react";
+import type { Citation, Grounding } from "../types";
 import BrandSpinner from "./BrandSpinner";
 
 interface Props {
   text: string;
   citations: Citation[];
   streaming: boolean;
+  grounding: Grounding | null;
 }
 
 // Renders dossier text, converting [[PMID:xxxx]] markers into clickable links.
@@ -31,7 +32,7 @@ function renderWithCitations(text: string) {
   });
 }
 
-export default function DossierPanel({ text, citations, streaming }: Props) {
+export default function DossierPanel({ text, citations, streaming, grounding }: Props) {
   if (!text && !streaming) {
     return (
       <div className="panel">
@@ -39,12 +40,37 @@ export default function DossierPanel({ text, citations, streaming }: Props) {
       </div>
     );
   }
+
+  const nUngrounded = grounding?.ungrounded?.length ?? 0;
+  const nCited = grounding?.cited_pmids?.length ?? 0;
+  const groundingBadge =
+    grounding && !streaming && nCited > 0 ? (
+      nUngrounded === 0 ? (
+        <span
+          className="grounding-badge ok"
+          title="Every cited PMID traces to a provided source abstract"
+          style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "var(--teal, #1f9c8e)" }}
+        >
+          <ShieldCheck size={13} /> {nCited} citation{nCited === 1 ? "" : "s"} grounded
+        </span>
+      ) : (
+        <span
+          className="grounding-badge warn"
+          title={`Ungrounded PMIDs: ${grounding!.ungrounded.map((u) => u.pmid).join(", ")}`}
+          style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "var(--hit, #e0a03a)" }}
+        >
+          <ShieldAlert size={13} /> {nUngrounded} of {nCited} citation{nCited === 1 ? "" : "s"} ungrounded
+        </span>
+      )
+    ) : null;
+
   return (
     <div className="panel">
       <div className="dossier">
         <div className="writing">
           {streaming ? <BrandSpinner size={13} label="writing" /> : <Sparkles size={12} />}
           {streaming ? "Knowledge agent writing…" : "Target dossier · grounded in retrieved literature"}
+          {groundingBadge && <span style={{ marginLeft: "auto" }}>{groundingBadge}</span>}
         </div>
         <div className="dossier-body">
           {renderWithCitations(text)}

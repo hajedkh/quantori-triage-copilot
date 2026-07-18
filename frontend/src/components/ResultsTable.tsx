@@ -1,19 +1,30 @@
 import { useState } from "react";
-import { Star, ChevronDown } from "lucide-react";
-import type { RankedMol } from "../types";
+import { Star, ChevronDown, Shuffle, Eye, EyeOff } from "lucide-react";
+import type { RankedMol, DiversityStats } from "../types";
 import MoleculeView from "./MoleculeView";
 import ConfidenceBadge from "./ConfidenceBadge";
 
 interface Props {
   ranked: RankedMol[];
+  diversity: DiversityStats | null;
 }
 
 function scoreColor(conf: string) {
   return conf === "High" ? "var(--hit)" : conf === "Medium" ? "var(--med)" : "var(--low)";
 }
 
-export default function ResultsTable({ ranked }: Props) {
+const DIVERSITY_LABEL: Record<string, string> = {
+  off: "score order",
+  scaffold: "scaffold-diverse",
+  mmr: "MMR",
+  cluster: "clustered",
+};
+
+export default function ResultsTable({ ranked, diversity }: Props) {
   const [open, setOpen] = useState<number | null>(null);
+  // Ground-truth labels stay hidden by default so the shortlist reads as a
+  // real (unlabelled) triage; the operator can reveal the held-out actives.
+  const [reveal, setReveal] = useState(false);
 
   if (ranked.length === 0) {
     return (
@@ -27,6 +38,51 @@ export default function ResultsTable({ ranked }: Props) {
 
   return (
     <div className="panel">
+      <div
+        className="results-toolbar"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "8px 12px",
+          fontSize: 11.5,
+          color: "var(--fg-dim, #9aa4b2)",
+        }}
+      >
+        {diversity && (
+          <span
+            className="diversity-chip"
+            title={`Diversifier: ${diversity.mode}${diversity.mode === "mmr" ? ` (λ=${diversity.lambda})` : ""}`}
+            style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+          >
+            <Shuffle size={12} />
+            {diversity.n_scaffolds != null ? `${diversity.n_scaffolds} scaffolds` : "diversity"}
+            {" · "}
+            {DIVERSITY_LABEL[diversity.mode] ?? diversity.mode}
+            {diversity.n_clusters != null ? ` · ${diversity.n_clusters} clusters` : ""}
+          </span>
+        )}
+        <button
+          className="reveal-toggle"
+          onClick={() => setReveal((r) => !r)}
+          title="Reveal or hide the held-out known actives (validation ground truth)"
+          style={{
+            marginLeft: "auto",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            background: "transparent",
+            border: "1px solid var(--line, #2a2f3a)",
+            borderRadius: 6,
+            padding: "3px 8px",
+            color: "inherit",
+            cursor: "pointer",
+          }}
+        >
+          {reveal ? <EyeOff size={12} /> : <Eye size={12} />}
+          {reveal ? "Hide validation" : "Reveal validation"}
+        </button>
+      </div>
       <div className="results">
         <div className="rrow head">
           <span>Rank</span>
@@ -52,7 +108,7 @@ export default function ResultsTable({ ranked }: Props) {
               >
                 <div className="rank-badge">
                   {m.rank}
-                  {m.is_known_active && (
+                  {reveal && m.is_known_active && (
                     <Star size={12} className="known-star" fill="currentColor" />
                   )}
                 </div>
@@ -70,7 +126,7 @@ export default function ResultsTable({ ranked }: Props) {
 
                 <div className="col-score score-bar-wrap">
                   <span className="score-val" style={{ color: scoreColor(m.confidence) }}>
-                    {m.score.toFixed(2)}
+                    {m.score.toFixed(3)}
                   </span>
                   <div className="score-track">
                     <div
@@ -108,12 +164,12 @@ export default function ResultsTable({ ranked }: Props) {
                         nearest active <b>{m.nearest_active}</b>
                       </span>
                       <span className="kv">
-                        score <b>{m.score.toFixed(2)}</b>
+                        score <b>{m.score.toFixed(3)}</b>
                       </span>
                       <span className="kv">
                         confidence <b>{m.confidence}</b>
                       </span>
-                      {m.is_known_active && (
+                      {reveal && m.is_known_active && (
                         <span className="kv" style={{ borderColor: "var(--hit)", color: "var(--hit)" }}>
                           ★ known active (ground truth)
                         </span>

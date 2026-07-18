@@ -9,6 +9,7 @@ interface Props {
   status: RunStatus; // reused from RunState — "idle" doubles as "setup" here
   lastSteerAck: { message: string; ts: number } | null;
   onCiteRank: (rank: number) => void;
+  onHistoryChange?: (messages: ChatMessage[]) => void;
   // true on the setup screen: renders inline below the form instead of
   // floating. Same mounted component either way — the conversation carries
   // over when a run starts and it switches to floating.
@@ -17,17 +18,23 @@ interface Props {
 
 const GREETING =
   "Triage Copilot. I can help you pick a target, check your library, and " +
-  "once the run starts I'll explain every decision the agents make. What " +
-  "are you screening?";
+  "once the run starts, I can help explain what's going on or answer questions about " +
+  "the process. What would you like to know?";
 
 function chipsFor(status: RunStatus): string[] {
-  if (status === "idle") return ["How do I start a run?"];
-  if (status === "running") return ["What has it done so far?", "How many survivors?"];
+  if (status === "idle") return ["How do I start a run?", "What public databases are used in the report?", "What does the diversity setting do?"];
+  if (status === "running")
+    return ["What has the workflow done so far?", "What public databases are used in the report?", "How many compounds survived the filter?", "What thresholds were used?", "How many compounds did the PAINS filter remove?"];
   if (status === "awaiting_approval")
     return [
-      "Why did #1 rank first?",
-      "Show me neighbours of #3",
-      "Re-rank favouring similarity",
+      "What public databases are used to prepare the report?",
+      "Summarize the methods used in this run.",
+      "Why did compound #1 rank first?",
+      "Should we diversify and rerun?",
+      "Which scaffolds are most prevalent in the top 20 compounds?",
+      "What is the diversify across scaffolds",
+      "How many known actives did we recover?",
+      "Show me compounds similar to #3 and #5 that are present in the top 250 compounds.",
     ];
   return [];
 }
@@ -116,9 +123,18 @@ function PreviewCard({ preview, onApply, onCancel }: { preview: ChatPreview; onA
   );
 }
 
-export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, docked }: Props) {
+export default function ChatPanel({
+  runId,
+  status,
+  lastSteerAck,
+  onCiteRank,
+  onHistoryChange,
+  docked,
+}: Props) {
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([{ role: "assistant", content: GREETING }]);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    { ts: Date.now(), role: "assistant", content: GREETING },
+  ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [pendingSteer, setPendingSteer] = useState<{ text: string; acked: boolean } | null>(null);
@@ -132,6 +148,10 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, open]);
+
+  useEffect(() => {
+    if (onHistoryChange) onHistoryChange(messages);
+  }, [messages, onHistoryChange]);
 
   // The moment the run starts, the docked card morphs into the floating
   // widget — keep it visibly open through that transition instead of
@@ -153,8 +173,15 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
   const runChatTurn = async (text: string) => {
     if (!runId) return;
     setSending(true);
-    const assistant: ChatMessage = { role: "assistant", content: "", toolCalls: [], streaming: true };
-    setMessages((m) => [...m, { role: "user", content: text }, assistant]);
+    const now = Date.now();
+    const assistant: ChatMessage = {
+      ts: now,
+      role: "assistant",
+      content: "",
+      toolCalls: [],
+      streaming: true,
+    };
+    setMessages((m) => [...m, { ts: now, role: "user", content: text }, assistant]);
 
     const onEvent = (e: ChatEvent) => {
       if (e.type === "tool_call" && e.payload?.tool) {
@@ -202,7 +229,10 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
     try {
       await askChat(runId, text, onEvent);
     } catch (err) {
-      setMessages((m) => [...m, { role: "assistant", content: `Chat request failed: ${String(err)}` }]);
+      setMessages((m) => [
+        ...m,
+        { ts: Date.now(), role: "assistant", content: `Chat request failed: ${String(err)}` },
+      ]);
     } finally {
       setSending(false);
       inFlightRef.current = false;
@@ -211,18 +241,28 @@ export default function ChatPanel({ runId, status, lastSteerAck, onCiteRank, doc
 
   const runSteerTurn = async (text: string) => {
     if (!runId) return;
+    setSending(true);
+    const now = Date.now();
     setMessages((m) => [
       ...m,
-      { role: "user", content: text },
-      { role: "assistant", content: "queued — reaches the agent at its next decision point" },
+      { ts: now, role: "user", content: text },
+      {
+        ts: now,
+        role: "assistant",
+        content: "queued — reaches the agent at its next decision point",
+      },
     ]);
     setPendingSteer({ text, acked: false });
     try {
       await steer(runId, text);
     } catch (err) {
-      setMessages((m) => [...m, { role: "assistant", content: `Couldn't queue that: ${String(err)}` }]);
+      setMessages((m) => [
+        ...m,
+        { ts: Date.now(), role: "assistant", content: `Couldn't queue that: ${String(err)}` },
+      ]);
       setPendingSteer(null);
     } finally {
+      setSending(false);
       inFlightRef.current = false;
     }
   };

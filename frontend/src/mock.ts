@@ -5,18 +5,21 @@ import type { Citation, LogEvent, RankedMol } from "./types";
 
 export interface StreamEvent {
   type:
-    | "agent_start"
-    | "agent_done"
-    | "log"
-    | "target_resolved"
-    | "funnel"
-    | "dossier_token"
-    | "citations"
-    | "ranked"
-    | "metric"
-    | "tool_call"
-    | "steer"
-    | "awaiting_approval";
+  | "agent_start"
+  | "agent_done"
+  | "log"
+  | "target_resolved"
+  | "funnel"
+  | "dossier_token"
+  | "citations"
+  | "grounding"
+  | "ranked"
+  | "metric"
+  | "diversity"
+  | "tool_call"
+  | "steer"
+  | "export_progress"
+  | "awaiting_approval";
   agent?: LogEvent["agent"];
   payload?: any;
 }
@@ -202,6 +205,15 @@ export async function runMockStream(
     await wait(38);
   }
   emit({ type: "citations", payload: CITATIONS });
+  emit({
+    type: "grounding",
+    payload: {
+      cited_pmids: ["15737014", "16729045"],
+      provided_pmids: ["15737014", "16729045"],
+      ungrounded: [],
+      all_grounded: true,
+    },
+  });
   emit({ type: "agent_done", agent: "knowledge" });
   await wait(300);
 
@@ -335,6 +347,10 @@ export async function runMockStream(
   });
   emit({ type: "agent_done", agent: "critic" });
   await wait(300);
+
+  // Human gate after critic: operator can approve export or run an
+  // additional diversification -> filter -> critic loop.
+  await wait(300);
   emit({ type: "awaiting_approval" });
 }
 
@@ -342,7 +358,7 @@ export function buildCsv(ranked: RankedMol[]): string {
   const head = "rank,smiles,score,confidence,nearest_active,max_similarity,reason";
   const rows = ranked.map(
     (r) =>
-      `${r.rank},"${r.smiles}",${r.score},${r.confidence},${r.nearest_active},${r.max_similarity},"${r.reason.replace(/"/g, "'")}"`
+      `${r.rank},"${r.smiles}",${r.score.toFixed(3)},${r.confidence},${r.nearest_active},${r.max_similarity},"${r.reason.replace(/"/g, "'")}"`
   );
   return [head, ...rows].join("\n");
 }

@@ -13,7 +13,7 @@ tool_call event's "error"/"retry" status is what makes that visible on the wire.
 from __future__ import annotations
 
 import json
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from . import llm as llm_module
 from .store import emit
@@ -32,6 +32,10 @@ async def run_tool_loop(
     max_iters: int = 6,
     force_tool_first: bool = True,
 ) -> str:
+    """
+    Run the LLM tool-calling loop for one agent, emitting events to the run's SSE
+    stream. Returns the final text output (or empty string if the model never
+    produced plain text)."""
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
@@ -55,7 +59,9 @@ async def run_tool_loop(
         # skips this forced round-trip so simple turns can resolve in one call.
         tool_choice = "required" if (iteration == 1 and force_tool_first) else "auto"
         try:
-            resp = await llm_module.chat(messages=messages, tools=tools, cfg=cfg, tool_choice=tool_choice)
+            resp = await llm_module.chat(
+                messages=messages, tools=tools, cfg=cfg, tool_choice=tool_choice
+            )
         except Exception as e:
             emit(
                 run,
@@ -95,7 +101,10 @@ async def run_tool_loop(
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
                     }
                     for tc in tool_calls
                 ],
@@ -138,7 +147,9 @@ async def run_tool_loop(
                 },
             )
 
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
+            messages.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": result_str}
+            )
 
         if iteration == max_iters:
             final_text = thought  # hard stop — best-effort, never raise

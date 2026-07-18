@@ -3,12 +3,33 @@
 This is the reliability anchor: given a list of candidate SMILES and a list of
 known-active SMILES, it standardizes, filters (Lipinski + PAINS), scores by
 similarity to the actives, and ranks. Same input -> same output.
+
+screen_parallel() distributes per-molecule work across processes. RDKit mol
+objects aren't picklable, so workers receive SMILES strings and rebuild
+molecules + active fingerprints inside each process (once, via initializer).
 """
 
 from __future__ import annotations
+import multiprocessing as mp
+import math
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Descriptors, AllChem, DataStructs, QED
+from rdkit.Chem import BRICS
 from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
+from rdkit.Chem.Scaffolds import MurckoScaffold
+
+# SA Score lives in rdkit.Contrib — path varies by installation.
+try:
+    from rdkit.Chem import RDConfig
+    import os as _os
+    import sys as _sys
+
+    _sys.path.append(_os.path.join(RDConfig.RDContribDir, "SA_Score"))
+    from sascorer import calculateScore as _sa_raw  # type: ignore
+except Exception:
+    _sa_raw = None
 
 RDLogger.DisableLog("rdApp.*")  # quiet parse warnings
 
@@ -17,15 +38,23 @@ _pains_params = FilterCatalogParams()
 _pains_params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS)
 _PAINS = FilterCatalog(_pains_params)
 
+# Minimum candidate count before spawning a pool is worthwhile.
+_PARALLEL_THRESHOLD = 500
+
+# ---- Worker-process state (set by _init_worker, used by _process_one) ----
+_w_active_fps: list = []
+
 
 def parse(smiles: str):
     """Parse SMILES -> largest fragment (strips salts). None if invalid."""
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
-    frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
-    if len(frags) > 1:
-        mol = max(frags, key=lambda m: m.GetNumAtoms())
+    # Only pay for fragment decomposition when salt dots are present.
+    if "." in smiles:
+        frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+        if len(frags) > 1:
+            mol = max(frags, key=lambda m: m.GetNumAtoms())
     return mol
 
 
@@ -38,16 +67,150 @@ def descriptors(mol) -> dict:
     }
 
 
-def lipinski_pass(d: dict, mw_max: float = 500, logp_max: float = 5, hbd_max: int = 5, hba_max: int = 10) -> bool:
-    return d["mw"] <= mw_max and d["logp"] <= logp_max and d["hbd"] <= hbd_max and d["hba"] <= hba_max
+def extended_descriptors(mol) -> dict:
+    """Comprehensive descriptor set for export. Computes everything a med-chem
+    triager would want in a single pass over the mol object.
+
+    Groups: identity, Lipinski Ro5, extended ADME-relevant, complexity,
+    ring systems, charge, and structural keys.
+    """
+    from rdkit.Chem import rdMolDescriptors, Crippen, Lipinski
+    from rdkit.Chem import inchi as inchi_mod
+
+    smi = Chem.MolToSmiles(mol)
+
+    # ---- Identity ----
+    try:
+        inchi_str = inchi_mod.MolToInchi(mol) or ""
+        inchikey = inchi_mod.InchiToInchiKey(inchi_str) if inchi_str else ""
+    except Exception:
+        inchi_str, inchikey = "", ""
+
+    formula = rdMolDescriptors.CalcMolFormula(mol)
+
+    # ---- Lipinski Ro5 ----
+    mw = round(Descriptors.MolWt(mol), 2)
+    logp = round(Crippen.MolLogP(mol), 3)
+    hbd = Descriptors.NumHDonors(mol)
+    hba = Descriptors.NumHAcceptors(mol)
+
+    # ---- Extended ADME-relevant ----
+    tpsa = round(Descriptors.TPSA(mol), 2)
+    rotatable_bonds = Lipinski.NumRotatableBonds(mol)
+    molar_refractivity = round(Crippen.MolMR(mol), 2)
+
+    # ---- Drug-likeness scores ----
+    try:
+        qed_val = round(QED.qed(mol), 3)
+    except Exception:
+        qed_val = None
+
+    sa = sa_score(mol)
+
+    # ---- Complexity / size ----
+    heavy_atoms = mol.GetNumHeavyAtoms()
+    fraction_csp3 = round(Descriptors.FractionCSP3(mol), 3)
+
+    # ---- Ring systems ----
+    ring_info = mol.GetRingInfo()
+    n_rings = ring_info.NumRings()
+    n_aromatic_rings = Descriptors.NumAromaticRings(mol)
+    n_heteroatoms = Descriptors.NumHeteroatoms(mol)
+
+    # ---- Charge ----
+    formal_charge = Chem.GetFormalCharge(mol)
+
+    # ---- PAINS ----
+    alerts = pains_flag(mol)
+
+    # ---- Scaffold ----
+    skey = scaffold_key(mol)
+
+    return {
+        # identity
+        "smiles": smi,
+        "inchi": inchi_str,
+        "inchikey": inchikey,
+        "molecular_formula": formula,
+        # Lipinski Ro5
+        "mw": mw,
+        "logp": logp,
+        "hbd": hbd,
+        "hba": hba,
+        # extended ADME
+        "tpsa": tpsa,
+        "rotatable_bonds": rotatable_bonds,
+        "molar_refractivity": molar_refractivity,
+        # drug-likeness
+        "qed": qed_val,
+        "sa_score": sa,
+        # complexity
+        "heavy_atoms": heavy_atoms,
+        "fraction_csp3": fraction_csp3,
+        # ring systems
+        "n_rings": n_rings,
+        "n_aromatic_rings": n_aromatic_rings,
+        "n_heteroatoms": n_heteroatoms,
+        # charge
+        "formal_charge": formal_charge,
+        # PAINS
+        "n_pains_alerts": len(alerts),
+        "pains_alerts": "; ".join(alerts) if alerts else "",
+        # scaffold
+        "scaffold": skey,
+    }
 
 
-def pains_flag(mol) -> bool:
-    return _PAINS.HasMatch(mol)
+def lipinski_violations(
+    d: dict,
+    mw_max: float = 500,
+    logp_max: float = 5,
+    hbd_max: int = 5,
+    hba_max: int = 10,
+) -> list[str]:
+    """
+    Return list of violated Ro5 criteria (empty = fully compliant).
+    """
+    violations = []
+    if d["mw"] > mw_max:
+        violations.append(f"MW {d['mw']} > {mw_max}")
+    if d["logp"] > logp_max:
+        violations.append(f"LogP {d['logp']} > {logp_max}")
+    if d["hbd"] > hbd_max:
+        violations.append(f"HBD {d['hbd']} > {hbd_max}")
+    if d["hba"] > hba_max:
+        violations.append(f"HBA {d['hba']} > {hba_max}")
+    return violations
 
 
-def fingerprint(mol):
-    return AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+def lipinski_pass(
+    d: dict,
+    mw_max: float = 500,
+    logp_max: float = 5,
+    hbd_max: int = 5,
+    hba_max: int = 10,
+    max_violations: int = 1,
+) -> bool:
+    """True Ro5: pass if at most `max_violations` criteria are violated."""
+    return (
+        len(lipinski_violations(d, mw_max, logp_max, hbd_max, hba_max))
+        <= max_violations
+    )
+
+
+def pains_flag(mol) -> list[str]:
+    """Return list of PAINS alert names that matched (empty = clean).
+    Uses HasMatch for a fast boolean pre-check — GetMatches only runs
+    when there's actually a hit, saving ~480 SMARTS evaluations on clean mols."""
+    if not _PAINS.HasMatch(mol):
+        return []
+    return [entry.GetDescription() for entry in _PAINS.GetMatches(mol)]
+
+
+def fingerprint(mol, use_chirality: bool = True):
+    return AllChem.GetMorganFingerprintAsBitVect(
+        mol, radius=2, nBits=2048, useChirality=use_chirality
+    )
 
 
 def max_tanimoto(fp, active_fps: list) -> tuple[float, int]:
@@ -57,6 +220,51 @@ def max_tanimoto(fp, active_fps: list) -> tuple[float, int]:
     sims = DataStructs.BulkTanimotoSimilarity(fp, active_fps)
     best = max(range(len(sims)), key=lambda i: sims[i])
     return round(sims[best], 3), best
+
+
+def similarity_profile(fp, active_fps: list, top_k: int = 3) -> dict:
+    """Richer similarity signal than max-only.
+
+    Returns {max_sim, max_idx, top_k_avg, n_above_03} where:
+    - max_sim / max_idx: best Tanimoto and which active
+    - top_k_avg: mean of the top-k similarities (breadth signal)
+    - n_above_03: count of actives with Tanimoto >= 0.3 (coverage)
+    """
+    if not active_fps:
+        return {"max_sim": 0.0, "max_idx": -1, "top_k_avg": 0.0, "n_above_03": 0}
+    sims = DataStructs.BulkTanimotoSimilarity(fp, active_fps)
+    sorted_sims = sorted(sims, reverse=True)
+    best_idx = max(range(len(sims)), key=lambda i: sims[i])
+    top_k_vals = sorted_sims[: min(top_k, len(sorted_sims))]
+    return {
+        "max_sim": round(sorted_sims[0], 3),
+        "max_idx": best_idx,
+        "top_k_avg": round(sum(top_k_vals) / len(top_k_vals), 3),
+        "n_above_03": sum(1 for s in sims if s >= 0.3),
+    }
+
+
+def sa_score(mol) -> float | None:
+    """Synthetic accessibility score (Ertl & Schuffenhauer).
+    Returns 0.0 (easy) to 1.0 (hard), normalized from the raw 1-10 scale.
+    None if SA scorer is unavailable."""
+    if _sa_raw is None:
+        return None
+    try:
+        raw = _sa_raw(mol)  # 1 (easy) – 10 (hard)
+        return round((raw - 1.0) / 9.0, 3)  # normalize to 0–1
+    except Exception:
+        return None
+
+
+def scaffold_key(mol) -> str:
+    """Bemis-Murcko generic framework as SMILES. Used for diversity clustering."""
+    try:
+        core = MurckoScaffold.GetScaffoldForMol(mol)
+        generic = MurckoScaffold.MakeScaffoldGeneric(core)
+        return Chem.MolToSmiles(generic)
+    except Exception:
+        return Chem.MolToSmiles(mol)
 
 
 def build_active_fps(active_smiles: list[str]):
@@ -69,16 +277,19 @@ def build_active_fps(active_smiles: list[str]):
     return fps, ids
 
 
-def screen(candidates: list[dict], active_smiles: list[str]) -> tuple[list[dict], dict]:
+def screen(
+    candidates: list[dict], active_smiles: list[str], max_violations: int = 1
+) -> tuple[list[dict], dict]:
     """Run the RDKit funnel over candidates.
 
     candidates: [{"smiles": str, "label": bool|None}, ...]
-    Returns (survivors, stats). Survivors pass Lipinski and are PAINS-clean.
+    Returns (survivors, stats). Survivors pass Lipinski (≤max_violations)
+    and are PAINS-clean.
     """
     active_fps, _ = build_active_fps(active_smiles)
 
     n_input = len(candidates)
-    n_invalid = n_lipinski = n_pains = 0
+    n_invalid = n_lipinski = n_pains = n_qed_err = 0
     survivors: list[dict] = []
 
     for c in candidates:
@@ -87,28 +298,44 @@ def screen(candidates: list[dict], active_smiles: list[str]) -> tuple[list[dict]
             n_invalid += 1
             continue
         d = descriptors(mol)
-        lip = lipinski_pass(d)
-        if not lip:
+        violations = lipinski_violations(d)
+        if len(violations) > max_violations:
             n_lipinski += 1
             continue
-        if pains_flag(mol):
+        alerts = pains_flag(mol)
+        if alerts:
             n_pains += 1
             continue
-        sim, idx = max_tanimoto(fingerprint(mol), active_fps)
+        fp = fingerprint(mol)
+        sim_prof = similarity_profile(fp, active_fps)
+        qed_error = False
         try:
             qed = round(QED.qed(mol), 3)
         except Exception:
-            qed = 0.5
+            qed = None
+            qed_error = True
+            n_qed_err += 1
         survivors.append(
             {
                 "smiles": Chem.MolToSmiles(mol),
                 "label": c.get("label"),
+                "is_diversified_generated": bool(c.get("is_diversified_generated")),
                 **d,
                 "qed": qed,
-                "lipinski_pass": lip,
+                "qed_error": qed_error,
+                "sa_score": sa_score(mol),
+                "scaffold": scaffold_key(mol),
+                "lipinski_pass": True,
+                "lipinski_violations": violations,
                 "pains_flag": False,
-                "max_similarity": sim,
-                "nearest_active": f"active#{idx}" if idx >= 0 else "-",
+                "pains_alerts": [],
+                "n_pains_alerts": 0,
+                "max_similarity": sim_prof["max_sim"],
+                "top_k_avg": sim_prof["top_k_avg"],
+                "n_actives_above_03": sim_prof["n_above_03"],
+                "nearest_active": (
+                    f"active#{sim_prof['max_idx']}" if sim_prof["max_idx"] >= 0 else "-"
+                ),
             }
         )
 
@@ -117,55 +344,795 @@ def screen(candidates: list[dict], active_smiles: list[str]) -> tuple[list[dict]
         "invalid": n_invalid,
         "lipinski_dropped": n_lipinski,
         "pains_dropped": n_pains,
+        "qed_errors": n_qed_err,
         "after_lipinski": n_input - n_invalid - n_lipinski,
         "survivors": len(survivors),
     }
     return survivors, stats
 
 
-def _confidence(sim: float, lip: bool) -> str:
-    if sim >= 0.60 and lip:
+def generate_diversified_candidates(
+    ranked_rows: list[dict],
+    mode: str = "scaffold",
+    lam: float = 0.7,
+    cutoff: float = 0.35,
+    max_seeds: int = 14,
+    max_fragments: int = 40,
+    max_generated: int = 200,
+) -> tuple[list[dict], dict]:
+    """Generate diversification compounds from ranked seeds via BRICS recombination.
+
+    The input is the existing ranked shortlist. We select diverse seeds, collect
+    BRICS fragments, then recombine fragments into new candidates.
+    """
+    if not ranked_rows:
+        return [], {"seed_count": 0, "fragments": 0, "generated": 0}
+
+    # Seed choice mirrors the operator-selected diversity mode.
+    seeds, _ = diversify(
+        ranked_rows, mode=mode, lam=lam, top_n=max_seeds, cutoff=cutoff
+    )
+    seed_smiles = [r["smiles"] for r in seeds]
+    seed_set = set(seed_smiles)
+
+    fragments: list = []
+    seen_fragments: set[str] = set()
+    for smi in seed_smiles:
+        mol = parse(smi)
+        if mol is None:
+            continue
+        try:
+            frag_smis = BRICS.BRICSDecompose(mol)
+        except Exception:
+            continue
+        for frag_smi in frag_smis:
+            frag_mol = Chem.MolFromSmiles(frag_smi)
+            if frag_mol is None:
+                continue
+            canonical_frag = Chem.MolToSmiles(frag_mol)
+            if canonical_frag in seen_fragments:
+                continue
+            seen_fragments.add(canonical_frag)
+            fragments.append(frag_mol)
+            if len(fragments) >= max_fragments:
+                break
+        if len(fragments) >= max_fragments:
+            break
+
+    if len(fragments) < 2:
+        return [], {
+            "seed_count": len(seed_smiles),
+            "fragments": len(fragments),
+            "generated": 0,
+        }
+
+    generated: list[dict] = []
+    seen: set[str] = set(seed_set)
+    try:
+        for mol in BRICS.BRICSBuild(fragments, maxDepth=2):
+            smi = canonical(Chem.MolToSmiles(mol))
+            if not smi or smi in seen:
+                continue
+            seen.add(smi)
+            generated.append(
+                {
+                    "smiles": smi,
+                    "label": None,
+                    "is_diversified_generated": True,
+                }
+            )
+            if len(generated) >= max_generated:
+                break
+    except Exception:
+        # If BRICS enumeration fails for this seed/fragment mix, return what we
+        # already produced instead of failing the rerun path.
+        pass
+
+    return generated, {
+        "seed_count": len(seed_smiles),
+        "fragments": len(fragments),
+        "generated": len(generated),
+    }
+
+
+# ---------------------------------------------------------------- parallel --
+
+
+def _init_worker(active_smiles: list[str]) -> None:
+    """Called once per subprocess. Rebuilds active fingerprints in worker
+    memory. Thresholds are passed per work-item so the pool can be reused
+    across screen_candidates calls with different parameters."""
+    global _w_active_fps
+    _w_active_fps, _ = build_active_fps(active_smiles)
+
+
+def _process_one(work_item: tuple[dict, dict]) -> dict:
+    """Process a single candidate molecule — runs inside a worker process.
+
+    work_item: (candidate_dict, thresholds_dict)
+    Returns a dict with a "status" routing key.
+    """
+    candidate, t = work_item
+    mol = parse(candidate["smiles"])
+    if mol is None:
+        return {"status": "invalid", "smiles": candidate["smiles"]}
+
+    d = descriptors(mol)
+    violations = lipinski_violations(
+        d,
+        mw_max=t["mw_max"],
+        logp_max=t["logp_max"],
+        hbd_max=t["hbd_max"],
+        hba_max=t["hba_max"],
+    )
+    if len(violations) > t["max_violations"]:
+        return {"status": "lipinski_dropped"}
+
+    alerts = pains_flag(mol)
+    if t["apply_pains"] and alerts:
+        return {"status": "pains_dropped"}
+
+    fp = fingerprint(mol)
+    sim_prof = similarity_profile(fp, _w_active_fps)
+
+    qed_val, qed_error = None, False
+    try:
+        qed_val = round(QED.qed(mol), 3)
+    except Exception:
+        qed_error = True
+
+    sa = sa_score(mol)
+    skey = scaffold_key(mol)
+
+    return {
+        "status": "survivor",
+        "smiles": Chem.MolToSmiles(mol),
+        "label": candidate.get("label"),
+        "is_diversified_generated": bool(candidate.get("is_diversified_generated")),
+        **d,
+        "qed": qed_val,
+        "qed_error": qed_error,
+        "sa_score": sa,
+        "scaffold": skey,
+        "lipinski_pass": True,
+        "lipinski_violations": violations,
+        "pains_flag": bool(alerts),
+        "pains_alerts": alerts,
+        "n_pains_alerts": len(alerts),
+        "max_similarity": sim_prof["max_sim"],
+        "top_k_avg": sim_prof["top_k_avg"],
+        "n_actives_above_03": sim_prof["n_above_03"],
+        "nearest_active": (
+            f"active#{sim_prof['max_idx']}" if sim_prof["max_idx"] >= 0 else "-"
+        ),
+    }
+
+
+def _process_batch(work_items: list[tuple[dict, dict]]) -> list[dict]:
+    """Process a batch of candidates in one worker call.
+    Reduces per-task IPC overhead vs submitting one future per molecule."""
+    return [_process_one(item) for item in work_items]
+
+
+def _aggregate(results: list[dict]) -> tuple[list[dict], dict, list[str]]:
+    """Reduce per-molecule results into (survivors, stats, invalid_examples)."""
+    survivors: list[dict] = []
+    n_invalid = n_lipinski = n_pains = n_qed_err = 0
+    invalid_examples: list[str] = []
+
+    for r in results:
+        st = r["status"]
+        if st == "invalid":
+            n_invalid += 1
+            if len(invalid_examples) < 3:
+                invalid_examples.append(r["smiles"])
+        elif st == "lipinski_dropped":
+            n_lipinski += 1
+        elif st == "pains_dropped":
+            n_pains += 1
+        elif st == "survivor":
+            if r.get("qed_error"):
+                n_qed_err += 1
+            r.pop("status")
+            survivors.append(r)
+
+    stats = {
+        "input": len(results),
+        "invalid": n_invalid,
+        "lipinski_dropped": n_lipinski,
+        "pains_dropped": n_pains,
+        "qed_errors": n_qed_err,
+        "after_lipinski": len(results) - n_invalid - n_lipinski,
+        "survivors": len(survivors),
+    }
+    return survivors, stats, invalid_examples
+
+
+# Small batches give good load balancing (fast workers get the next batch
+# immediately via as_completed) without excessive IPC overhead.
+_BATCH_SIZE = 64
+
+
+class ScreenPool:
+    """Persistent process pool for screening. Created once per run when
+    actives are known, reused across agent re-screens with different
+    thresholds. Eliminates repeated fork/init overhead between calls.
+
+    Usage:
+        pool = ScreenPool(active_smiles, n_workers=4)
+        survivors, stats, bad = pool.screen(candidates, thresholds)
+        # ... agent adjusts thresholds ...
+        survivors, stats, bad = pool.screen(candidates, new_thresholds)
+        pool.shutdown()
+    """
+
+    def __init__(self, active_smiles: list[str], n_workers: int | None = None):
+        self._n_workers = n_workers or min(mp.cpu_count(), 8)
+        self._active_smiles = active_smiles
+        self._pool: ProcessPoolExecutor | None = None
+
+    def _ensure_pool(self) -> ProcessPoolExecutor:
+        if self._pool is None:
+            self._pool = ProcessPoolExecutor(
+                max_workers=self._n_workers,
+                initializer=_init_worker,
+                initargs=(self._active_smiles,),
+            )
+        return self._pool
+
+    def screen(
+        self,
+        candidates: list[dict],
+        thresholds: dict,
+    ) -> tuple[list[dict], dict, list[str]]:
+        n = len(candidates)
+        if n < _PARALLEL_THRESHOLD:
+            # Sequential — no fork overhead for small libraries
+            _init_worker(self._active_smiles)
+            results = [_process_one((c, thresholds)) for c in candidates]
+            return _aggregate(results)
+
+        pool = self._ensure_pool()
+
+        # Chunk candidates into small batches and submit them all.
+        # as_completed lets fast workers pick up the next batch immediately
+        # instead of idling until the slowest worker in a map() chunk finishes.
+        batches = []
+        for i in range(0, n, _BATCH_SIZE):
+            batch = [(c, thresholds) for c in candidates[i : i + _BATCH_SIZE]]
+            batches.append(batch)
+
+        futures = [pool.submit(_process_batch, b) for b in batches]
+
+        results: list[dict] = []
+        for future in as_completed(futures):
+            results.extend(future.result())
+
+        return _aggregate(results)
+
+    def shutdown(self) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=False)
+            self._pool = None
+
+    def __del__(self):
+        self.shutdown()
+
+
+def screen_parallel(
+    candidates: list[dict],
+    active_smiles: list[str],
+    thresholds: dict,
+    n_workers: int | None = None,
+    pool: ScreenPool | None = None,
+) -> tuple[list[dict], dict, list[str]]:
+    """Parallel screening entry point.
+
+    If a ScreenPool is provided, reuses it (no fork overhead). Otherwise
+    creates a one-shot pool for backwards compatibility.
+    """
+    if pool is not None:
+        return pool.screen(candidates, thresholds)
+
+    # One-shot fallback — still better than sequential for large inputs
+    one_shot = ScreenPool(active_smiles, n_workers)
+    try:
+        return one_shot.screen(candidates, thresholds)
+    finally:
+        one_shot.shutdown()
+
+
+def _confidence(
+    score: float,
+    sim: float,
+    lipinski_pass: bool,
+    policy: str = "balanced",
+) -> str:
+    """Confidence bucket using score + similarity with policy-specific gates."""
+    policy = (policy or "balanced").lower()
+    if policy == "strict":
+        if score >= 0.62 and sim >= 0.55 and lipinski_pass:
+            return "High"
+        if score >= 0.38 and sim >= 0.30 and lipinski_pass:
+            return "Medium"
+        return "Low"
+
+    if policy == "explore":
+        if score >= 0.52 and sim >= 0.40 and lipinski_pass:
+            return "High"
+        if score >= 0.25 and sim >= 0.18:
+            return "Medium"
+        return "Low"
+
+    if policy == "quality":
+        if score >= 0.58 and sim >= 0.52 and lipinski_pass:
+            return "High"
+        if score >= 0.34 and sim >= 0.28:
+            return "Medium"
+        return "Low"
+
+    # balanced (default)
+    if score >= 0.55 and sim >= 0.50 and lipinski_pass:
         return "High"
-    if sim >= 0.30:
+    if score >= 0.30 and sim >= 0.25:
         return "Medium"
     return "Low"
 
 
-def rank(survivors: list[dict], active_chembl_ids: list[str], top_n: int = 600) -> list[dict]:
-    """Score, bucket confidence, drop Low, sort, take top_n, assign ranks."""
+# ---- Default scoring weights ----
+DEFAULT_WEIGHTS = {
+    "similarity": 0.40,  # max Tanimoto to nearest active
+    "breadth": 0.15,  # top-k average (multi-active coverage)
+    "qed": 0.20,  # drug-likeness
+    "sa": 0.15,  # synthetic accessibility (inverted: easy = high)
+    "penalty_lipinski": 0.05,  # per violation
+    "penalty_pains": 0.03,  # per PAINS alert (graduated, not binary)
+}
+
+RANKING_PROFILES = {
+    "balanced": {
+        "weights": {**DEFAULT_WEIGHTS},
+        "score_mode": "enhanced",
+        "confidence_policy": "balanced",
+    },
+    "quality": {
+        "weights": {
+            **DEFAULT_WEIGHTS,
+            "similarity": 0.48,
+            "breadth": 0.18,
+            "qed": 0.18,
+            "sa": 0.10,
+        },
+        "score_mode": "enhanced",
+        "confidence_policy": "quality",
+    },
+    "explore": {
+        "weights": {
+            **DEFAULT_WEIGHTS,
+            "similarity": 0.30,
+            "breadth": 0.24,
+            "qed": 0.16,
+            "sa": 0.12,
+            "penalty_lipinski": 0.04,
+            "penalty_pains": 0.02,
+        },
+        "score_mode": "enhanced",
+        "confidence_policy": "explore",
+    },
+    "strict": {
+        "weights": {
+            **DEFAULT_WEIGHTS,
+            "similarity": 0.38,
+            "breadth": 0.14,
+            "qed": 0.20,
+            "sa": 0.14,
+            "penalty_lipinski": 0.08,
+            "penalty_pains": 0.05,
+        },
+        "score_mode": "enhanced",
+        "confidence_policy": "strict",
+    },
+}
+
+
+def resolve_ranking_profile(profile: str | None) -> dict:
+    key = (profile or "balanced").lower()
+    return RANKING_PROFILES.get(key, RANKING_PROFILES["balanced"])
+
+
+def compute_score(
+    s: dict,
+    weights: dict | None = None,
+    score_mode: str = "classic",
+    uncertainty_penalty: float = 0.02,
+) -> float:
+    """Compute the composite triage score for a survivor dict.
+
+    score = w_sim × max_similarity
+          + w_breadth × top_k_avg
+          + w_qed × QED
+          + w_sa × (1 - SA_norm)           # lower SA = easier = better
+          - penalty_lipinski × n_violations
+          - penalty_pains × n_alerts
+    """
+    w = {**DEFAULT_WEIGHTS, **(weights or {})}
+
+    sim = s["max_similarity"]
+    breadth = s.get("top_k_avg", sim)  # fallback to max if profile missing
+    missing_count = 0
+    if s.get("qed") is None:
+        qed = 0.45
+        missing_count += 1
+    else:
+        qed = s["qed"]
+    sa = s.get("sa_score")
+    if sa is None:
+        sa_term = 0.5
+        missing_count += 1
+    else:
+        sa_term = 1.0 - sa
+    n_viol = len(s.get("lipinski_violations", []))
+    n_pains = s.get("n_pains_alerts", 1 if s.get("pains_flag") else 0)
+
+    mode = (score_mode or "classic").lower()
+    if mode == "enhanced":
+        # Saturate very-high similarities so one analog series doesn't dominate.
+        sim_term = 1.0 - math.exp(-2.2 * max(0.0, sim))
+        breadth_term = 1.0 - math.exp(-1.8 * max(0.0, breadth))
+        lip_pen = w["penalty_lipinski"] * (n_viol**1.2)
+        pains_pen = w["penalty_pains"] * (n_pains**1.35)
+        raw = (
+            w["similarity"] * sim_term
+            + w["breadth"] * breadth_term
+            + w["qed"] * qed
+            + w["sa"] * sa_term
+            - lip_pen
+            - pains_pen
+            - uncertainty_penalty * missing_count
+        )
+        # Map raw score to a stable 0-1 range with smoother tails.
+        cal = 1.0 / (1.0 + math.exp(-(raw - 0.32) / 0.14))
+        return round(max(0.0, min(cal, 1.0)), 3)
+
+    raw = (
+        w["similarity"] * sim
+        + w["breadth"] * breadth
+        + w["qed"] * qed
+        + w["sa"] * sa_term
+        - w["penalty_lipinski"] * n_viol
+        - w["penalty_pains"] * n_pains
+    )
+    return round(max(0.0, min(raw, 1.0)), 3)
+
+
+def _build_reason(s: dict, score: float, nearest_id: str) -> str:
+    """Human-readable rationale string for a ranked compound."""
+    sim = s["max_similarity"]
+    parts = [f"{sim:.2f} Tanimoto to {nearest_id}"]
+
+    breadth = s.get("top_k_avg")
+    n_above = s.get("n_actives_above_03", 0)
+    if breadth is not None and breadth != sim:
+        parts.append(f"top-3 avg {breadth:.2f}")
+    if n_above > 1:
+        parts.append(f"similar to {n_above} actives")
+
+    lip_v = s.get("lipinski_violations", [])
+    if lip_v:
+        parts.append(f"Lipinski: {len(lip_v)} violation(s)")
+    else:
+        parts.append("passes Lipinski")
+
+    sa = s.get("sa_score")
+    if sa is not None:
+        ease = "easy" if sa < 0.33 else ("moderate" if sa < 0.66 else "hard")
+        parts.append(f"SA: {ease} ({1 - sa:.2f})")
+
+    n_pains = s.get("n_pains_alerts", 0)
+    if n_pains:
+        parts.append(f"{n_pains} PAINS alert(s)")
+
+    if s.get("qed_error"):
+        parts.append("QED unavailable")
+
+    return "; ".join(parts) + "."
+
+
+def diversity_rerank(scored: list[dict], top_n: int) -> list[dict]:
+    """Scaffold-aware greedy pick to ensure chemotype diversity.
+
+    Walks the score-sorted list and picks the next highest-scoring compound
+    whose Bemis-Murcko scaffold hasn't been seen more than `max_per_scaffold`
+    times. This prevents the top-N from being dominated by analogs of one
+    active, while still respecting the score ordering within each scaffold.
+    """
+    if not scored:
+        return []
+
+    # Allow more representatives from high-scoring scaffolds, but cap
+    n_scaffolds_est = len({s.get("scaffold", s["smiles"]) for s in scored})
+    if n_scaffolds_est > 0:
+        max_per = max(3, top_n // max(1, n_scaffolds_est))
+    else:
+        max_per = max(3, top_n // 10)
+
+    scaffold_counts: dict[str, int] = {}
+    picked: list[dict] = []
+
+    for s in scored:
+        if len(picked) >= top_n:
+            break
+        skey = s.get("scaffold", s["smiles"])
+        count = scaffold_counts.get(skey, 0)
+        if count < max_per:
+            scaffold_counts[skey] = count + 1
+            picked.append(s)
+
+    # If we couldn't fill top_n due to diversity caps, backfill from skipped
+    if len(picked) < top_n:
+        picked_smiles = {p["smiles"] for p in picked}
+        for s in scored:
+            if len(picked) >= top_n:
+                break
+            if s["smiles"] not in picked_smiles:
+                picked.append(s)
+
+    return picked
+
+
+# ---------------------------------------------------------- diversification --
+# These operate on an already-scored/ranked list (each row carries "smiles",
+# "score", and usually "scaffold") and re-select/re-order it for chemotype
+# diversity. They never invent scores — only which rows survive and in what
+# order changes. Used by the Diversifier agent (agents.py) and the chat
+# copilot's diversify_shortlist tool (chat_tools.py).
+
+
+def _fps_for_rows(rows: list[dict]) -> list:
+    """Morgan fingerprint per row (None where the SMILES won't parse)."""
+    out = []
+    for r in rows:
+        m = parse(r["smiles"])
+        out.append(fingerprint(m) if m is not None else None)
+    return out
+
+
+def mmr_select(rows: list[dict], top_n: int, lam: float = 0.7) -> list[dict]:
+    """Maximal Marginal Relevance selection.
+
+    Greedily picks the row maximizing
+        lam * norm_score(i)  -  (1 - lam) * max Tanimoto(i, already_picked)
+    so high lam favours quality (pure score) and low lam favours spread.
+    Scores are min-max normalized only for the trade-off; the row's own
+    "score" field is left untouched.
+    """
+    if not rows:
+        return []
+    lam = max(0.0, min(1.0, lam))
+    fps = _fps_for_rows(rows)
+    scores = [r.get("score", 0.0) or 0.0 for r in rows]
+    smax = max(scores) or 1.0
+    norm = [s / smax for s in scores]
+
+    pool = list(range(len(rows)))
+    chosen: list[int] = []
+    chosen_fps: list = []
+    while pool and len(chosen) < top_n:
+        best_i, best_val = pool[0], None
+        for i in pool:
+            if chosen_fps and fps[i] is not None:
+                redundancy = max(DataStructs.BulkTanimotoSimilarity(fps[i], chosen_fps))
+            else:
+                redundancy = 0.0
+            val = lam * norm[i] - (1.0 - lam) * redundancy
+            if best_val is None or val > best_val:
+                best_val, best_i = val, i
+        chosen.append(best_i)
+        if fps[best_i] is not None:
+            chosen_fps.append(fps[best_i])
+        pool.remove(best_i)
+    return [rows[i] for i in chosen]
+
+
+def butina_clusters(smiles_list: list[str], cutoff: float = 0.35) -> list[int]:
+    """Butina cluster ids aligned 1:1 with smiles_list (-1 = unparseable).
+
+    cutoff is a Tanimoto *distance* (1 - similarity): 0.35 groups molecules
+    that are >= 0.65 similar. Clusters are numbered by descending size, as
+    RDKit's Butina returns them.
+    """
+    from rdkit.ML.Cluster import Butina
+
+    fps, idx_map = [], []
+    for i, smi in enumerate(smiles_list):
+        m = parse(smi)
+        if m is not None:
+            fps.append(fingerprint(m))
+            idx_map.append(i)
+
+    labels = [-1] * len(smiles_list)
+    n = len(fps)
+    if n == 0:
+        return labels
+
+    # Condensed lower-triangle distance matrix, as Butina expects.
+    dists: list[float] = []
+    for i in range(1, n):
+        sims = DataStructs.BulkTanimotoSimilarity(fps[i], fps[:i])
+        dists.extend(1.0 - s for s in sims)
+
+    clusters = Butina.ClusterData(dists, n, cutoff, isDistData=True)
+    for cid, members in enumerate(clusters):
+        for m in members:
+            labels[idx_map[m]] = cid
+    return labels
+
+
+def cluster_pick(
+    rows: list[dict], top_n: int, cutoff: float = 0.35
+) -> tuple[list[dict], int]:
+    """Butina-cluster the rows, then round-robin the best-scoring member of
+    each cluster (clusters ordered by their best score) until top_n is full.
+    Returns (selected_rows, n_clusters)."""
+    if not rows:
+        return [], 0
+    from collections import defaultdict
+
+    labels = butina_clusters([r["smiles"] for r in rows], cutoff)
+    buckets: dict[int, list[int]] = defaultdict(list)
+    for i, lab in enumerate(labels):
+        buckets[lab].append(i)  # rows already score-sorted, so each bucket is too
+
+    order = sorted(
+        buckets.keys(),
+        key=lambda c: max(rows[i].get("score", 0.0) or 0.0 for i in buckets[c]),
+        reverse=True,
+    )
+    pointers = {c: 0 for c in order}
+    picked: list[int] = []
+    while len(picked) < top_n:
+        progressed = False
+        for c in order:
+            p = pointers[c]
+            if p < len(buckets[c]):
+                picked.append(buckets[c][p])
+                pointers[c] += 1
+                progressed = True
+                if len(picked) >= top_n:
+                    break
+        if not progressed:
+            break
+    return [rows[i] for i in picked], len(buckets)
+
+
+def _renumber(rows: list[dict]) -> list[dict]:
+    for i, r in enumerate(rows, 1):
+        r["rank"] = i
+    return rows
+
+
+def _diversity_stats(rows: list[dict], mode: str, lam: float, n_clusters=None) -> dict:
+    scaffolds = {r.get("scaffold", "") for r in rows if r.get("scaffold")}
+    return {
+        "mode": mode,
+        "lambda": round(lam, 2),
+        "n_selected": len(rows),
+        "n_scaffolds": len(scaffolds) if scaffolds else None,
+        "n_clusters": n_clusters,
+    }
+
+
+DIVERSITY_MODES = ("off", "scaffold", "mmr", "cluster")
+
+
+def diversify(
+    rows: list[dict],
+    mode: str = "scaffold",
+    lam: float = 0.7,
+    top_n: int | None = None,
+    cutoff: float = 0.35,
+) -> tuple[list[dict], dict]:
+    """Re-order/select an already-ranked shortlist for chemotype diversity.
+
+    mode:
+      - "off":      pure score order (no diversity applied)
+      - "scaffold": Bemis-Murcko scaffold round-robin (chem.diversity_rerank)
+      - "mmr":      maximal marginal relevance with `lam`
+      - "cluster":  Butina cluster round-robin at distance `cutoff`
+
+    Returns (new_rows, stats). Rows are re-numbered 1..N. Input is copied by
+    reference; callers pass run.ranked and reassign it to the result.
+    """
+    if mode not in DIVERSITY_MODES:
+        raise ValueError(
+            f"unknown diversify mode {mode!r} — expected one of {DIVERSITY_MODES}"
+        )
+    if top_n is None:
+        top_n = len(rows)
+
+    ordered = sorted(rows, key=lambda r: r.get("score", 0.0) or 0.0, reverse=True)
+    n_clusters = None
+
+    if not ordered or mode == "off":
+        out = ordered[:top_n]
+    elif mode == "scaffold":
+        out = diversity_rerank(ordered, top_n)
+    elif mode == "mmr":
+        out = mmr_select(ordered, top_n, lam)
+    else:  # cluster
+        out, n_clusters = cluster_pick(ordered, top_n, cutoff)
+
+    return _renumber(out), _diversity_stats(out, mode, lam, n_clusters)
+
+
+def canonical(smiles: str) -> str | None:
+    """Canonicalize a SMILES string. Returns None if unparseable."""
+    mol = parse(smiles)
+    if mol is None:
+        return None
+    return Chem.MolToSmiles(mol)
+
+
+def rank(
+    survivors: list[dict],
+    active_chembl_ids: list[str],
+    top_n: int = 600,
+    weights: dict | None = None,
+    diversity: bool = True,
+    profile: str = "balanced",
+) -> list[dict]:
+    """Score, bucket confidence, drop Low, diversity-rerank, assign ranks."""
+    profile_cfg = resolve_ranking_profile(profile)
+    merged_weights = {
+        **profile_cfg["weights"],
+        **(weights or {}),
+    }
+    score_mode = profile_cfg["score_mode"]
+    confidence_policy = profile_cfg["confidence_policy"]
+
     scored = []
     for s in survivors:
+        score = compute_score(s, merged_weights, score_mode=score_mode)
         sim = s["max_similarity"]
-        score = 0.6 * sim + 0.3 * s["qed"] + 0.1 * (0.0 if s["pains_flag"] else 1.0)
-        conf = _confidence(sim, s["lipinski_pass"])
+        conf = _confidence(score, sim, s["lipinski_pass"], confidence_policy)
         if conf == "Low":
             continue
-        # map nearest active index -> a chembl-ish id for display
-        idx = int(s["nearest_active"].split("#")[-1]) if "#" in s["nearest_active"] else -1
+        idx = (
+            int(s["nearest_active"].split("#")[-1])
+            if "#" in s["nearest_active"]
+            else -1
+        )
         nearest = (
             active_chembl_ids[idx]
             if 0 <= idx < len(active_chembl_ids)
             else s["nearest_active"]
         )
-        reason = (
-            f"{sim:.2f} Tanimoto to {nearest} (known active); "
-            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski; "
-            f"{'no PAINS' if not s['pains_flag'] else 'PAINS flagged'}."
-        )
         scored.append(
             {
                 "smiles": s["smiles"],
-                "score": round(min(score, 0.99), 3),
+                "score": score,
                 "confidence": conf,
-                "reason": reason,
+                "reason": _build_reason(s, score, nearest),
                 "nearest_active": nearest,
                 "max_similarity": sim,
-                "is_known_active": bool(s.get("label")) if s.get("label") is not None else False,
+                "scaffold": s.get("scaffold", ""),
+                "sa_score": s.get("sa_score"),
+                "is_diversified_generated": bool(
+                    s.get("is_diversified_generated", False)
+                ),
+                "is_known_active": (
+                    bool(s.get("label")) if s.get("label") is not None else False
+                ),
             }
         )
 
     scored.sort(key=lambda r: r["score"], reverse=True)
-    top = scored[:top_n]
+
+    if diversity:
+        top = diversity_rerank(scored, top_n)
+    else:
+        top = scored[:top_n]
+
     for i, r in enumerate(top, 1):
         r["rank"] = i
     return top

@@ -1,4 +1,4 @@
-import type { Citation, RankedMol } from "../types";
+import type { Citation, RankedMol, Grounding, DiversityStats } from "../types";
 import DossierPanel from "./DossierPanel";
 import ResultsTable from "./ResultsTable";
 
@@ -9,6 +9,8 @@ interface Props {
   citations: Citation[];
   dossierStreaming: boolean;
   ranked: RankedMol[];
+  grounding: Grounding | null;
+  diversity: DiversityStats | null;
 }
 
 export default function OutputTabs({
@@ -18,6 +20,8 @@ export default function OutputTabs({
   citations,
   dossierStreaming,
   ranked,
+  grounding,
+  diversity,
 }: Props) {
   return (
     <div className="outputs">
@@ -33,9 +37,9 @@ export default function OutputTabs({
       </div>
 
       {tab === "dossier" ? (
-        <DossierPanel text={dossier} citations={citations} streaming={dossierStreaming} />
+        <DossierPanel text={dossier} citations={citations} streaming={dossierStreaming} grounding={grounding} />
       ) : (
-        <ResultsTable ranked={ranked} />
+        <ResultsTable ranked={ranked} diversity={diversity} />
       )}
     </div>
   );

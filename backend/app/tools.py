@@ -27,6 +27,7 @@ _MAX_BATCH = 10
 # models (mistral, tested directly) silently stop calling tools and narrate
 # instead. Reasoning detail belongs in the system prompt, not here.
 
+
 def screen_candidates_schema() -> dict:
     return {
         "type": "function",
@@ -36,11 +37,30 @@ def screen_candidates_schema() -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "mw_max": {"type": "number", "description": "Max molecular weight. Default 500."},
-                    "logp_max": {"type": "number", "description": "Max logP. Default 5."},
-                    "hbd_max": {"type": "integer", "description": "Max H-bond donors. Default 5."},
-                    "hba_max": {"type": "integer", "description": "Max H-bond acceptors. Default 10."},
-                    "apply_pains": {"type": "boolean", "description": "Drop PAINS-flagged structures. Default true."},
+                    "mw_max": {
+                        "type": "number",
+                        "description": "Max molecular weight. Default 500.",
+                    },
+                    "logp_max": {
+                        "type": "number",
+                        "description": "Max logP. Default 5.",
+                    },
+                    "hbd_max": {
+                        "type": "integer",
+                        "description": "Max H-bond donors. Default 5.",
+                    },
+                    "hba_max": {
+                        "type": "integer",
+                        "description": "Max H-bond acceptors. Default 10.",
+                    },
+                    "apply_pains": {
+                        "type": "boolean",
+                        "description": "Drop PAINS-flagged structures. Default true.",
+                    },
+                    "max_violations": {
+                        "type": "integer",
+                        "description": "Max Lipinski violations tolerated. Default 1 (true Ro5).",
+                    },
                 },
                 "required": [],
             },
@@ -95,18 +115,33 @@ def rank_survivors_schema() -> dict:
         "type": "function",
         "function": {
             "name": "rank_survivors",
-            "description": "Score and rank the current survivors into the final shortlist using your chosen weights.",
+            "description": "Score and rank survivors into the final shortlist. Uses similarity, breadth, QED, SA, and graduated penalties.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "top_n": {"type": "integer", "description": "Max results to keep. Default 600."},
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Max results to keep. Default 600.",
+                    },
+                    "diversity": {
+                        "type": "boolean",
+                        "description": "Scaffold-aware diversity reranking. Default true.",
+                    },
+                    "profile": {
+                        "type": "string",
+                        "enum": ["balanced", "quality", "explore", "strict"],
+                        "description": "Ranking profile preset. Default uses run-selected profile.",
+                    },
                     "weights": {
                         "type": "object",
-                        "description": "similarity/qed/pains weights. Defaults 0.6/0.3/0.1.",
+                        "description": "Score component weights. Defaults: similarity 0.40, breadth 0.15, qed 0.20, sa 0.15, penalty_lipinski 0.05/violation, penalty_pains 0.03/alert.",
                         "properties": {
                             "similarity": {"type": "number"},
+                            "breadth": {"type": "number"},
                             "qed": {"type": "number"},
-                            "pains": {"type": "number"},
+                            "sa": {"type": "number"},
+                            "penalty_lipinski": {"type": "number"},
+                            "penalty_pains": {"type": "number"},
                         },
                     },
                 },
@@ -127,6 +162,49 @@ def get_funnel_stats_schema() -> dict:
     }
 
 
+def submit_ranking_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "submit_ranking",
+            "description": "Submit the final ranked shortlist with per-compound evidence notes. Call AFTER rank_survivors.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "evidence_notes": {
+                        "type": "array",
+                        "description": "Per-compound evidence for top hits.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "smiles": {
+                                    "type": "string",
+                                    "description": "Canonical SMILES of the compound.",
+                                },
+                                "evidence_used": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Which tool results backed your judgment.",
+                                },
+                            },
+                            "required": ["smiles", "evidence_used"],
+                        },
+                    },
+                    "yield_ok": {
+                        "type": "boolean",
+                        "description": "True if ranked set size is reasonable.",
+                    },
+                    "replan_reason": {
+                        "type": ["string", "null"],
+                        "description": "Why yield is problematic, if yield_ok is false.",
+                    },
+                },
+                "required": ["evidence_notes", "yield_ok"],
+            },
+        },
+    }
+
+
 CHEM_TOOLS = [
     screen_candidates_schema(),
     compute_descriptors_schema(),
@@ -138,10 +216,12 @@ CRITIC_TOOLS = [
     compute_descriptors_schema(),
     get_funnel_stats_schema(),
     rank_survivors_schema(),
+    submit_ranking_schema(),
 ]
 
 
 # ---------------------------------------------------------- implementations --
+
 
 def _screen_candidates(
     run,
@@ -150,80 +230,65 @@ def _screen_candidates(
     hbd_max: int = 5,
     hba_max: int = 10,
     apply_pains: bool = True,
+    max_violations: int = 1,
 ) -> dict:
-    active_fps, _ = chem.build_active_fps(run.known_actives)
-
-    n_input = len(run.candidates)
-    n_invalid = n_lipinski = n_pains = 0
-    survivors: list[dict] = []
-    invalid_examples: list[str] = []
-
-    for c in run.candidates:
-        mol = chem.parse(c["smiles"])
-        if mol is None:
-            n_invalid += 1
-            if len(invalid_examples) < _MAX_EXAMPLES:
-                invalid_examples.append(c["smiles"])
-            continue
-        d = chem.descriptors(mol)
-        lip = chem.lipinski_pass(d, mw_max=mw_max, logp_max=logp_max, hbd_max=hbd_max, hba_max=hba_max)
-        if not lip:
-            n_lipinski += 1
-            continue
-        flagged = chem.pains_flag(mol)
-        if apply_pains and flagged:
-            n_pains += 1
-            continue
-        sim, idx = chem.max_tanimoto(chem.fingerprint(mol), active_fps)
-        try:
-            qed = round(chem.QED.qed(mol), 3)
-        except Exception:
-            qed = 0.5
-        survivors.append(
-            {
-                "smiles": chem.Chem.MolToSmiles(mol),
-                "label": c.get("label"),
-                **d,
-                "qed": qed,
-                "lipinski_pass": lip,
-                "pains_flag": flagged,
-                "max_similarity": sim,
-                "nearest_active": f"active#{idx}" if idx >= 0 else "-",
-            }
-        )
-
-    stats = {
-        "input": n_input,
-        "invalid": n_invalid,
-        "lipinski_dropped": n_lipinski,
-        "pains_dropped": n_pains,
-        "after_lipinski": n_input - n_invalid - n_lipinski,
-        "survivors": len(survivors),
+    thresholds = {
+        "mw_max": mw_max,
+        "logp_max": logp_max,
+        "hbd_max": hbd_max,
+        "hba_max": hba_max,
+        "apply_pains": apply_pains,
+        "max_violations": max_violations,
     }
-    run.survivors = survivors
-    run.screen_stats = stats
 
-    emit(run, {"type": "funnel", "payload": {"input": n_input, "filtered": len(survivors), "ranked": None}})
+    # Reuse a persistent pool across re-screens — the agent often calls
+    # screen_candidates 2-3 times with adjusted thresholds. Creating the
+    # pool once avoids repeated fork + active-fps-rebuild overhead.
+    if getattr(run, "_screen_pool", None) is None:
+        run._screen_pool = chem.ScreenPool(run.known_actives)
+
+    survivors, stats, invalid_examples = chem.screen_parallel(
+        run.candidates,
+        run.known_actives,
+        thresholds,
+        pool=run._screen_pool,
+    )
+
+    prior_added = (run.screen_stats or {}).get("diversified_added", 0)
+    run.survivors = survivors
+    run.screen_stats = {**stats, "diversified_added": prior_added}
+
+    emit(
+        run,
+        {
+            "type": "funnel",
+            "payload": {
+                "input": stats["input"],
+                "filtered": stats["survivors"],
+                "ranked": None,
+                "diversified_added": prior_added,
+            },
+        },
+    )
 
     summary = {
-        "thresholds": {
-            "mw_max": mw_max,
-            "logp_max": logp_max,
-            "hbd_max": hbd_max,
-            "hba_max": hba_max,
-            "apply_pains": apply_pains,
-        },
+        "thresholds": thresholds,
         "stats": stats,
         "survivor_examples": [
-            {"smiles": s["smiles"], "max_similarity": s["max_similarity"], "qed": s["qed"]}
+            {
+                "smiles": s["smiles"],
+                "max_similarity": s["max_similarity"],
+                "qed": s["qed"],
+                "lipinski_violations": s["lipinski_violations"],
+            }
             for s in survivors[:_MAX_EXAMPLES]
         ],
     }
     if invalid_examples:
         summary["invalid_examples"] = invalid_examples
         summary["hint"] = (
-            f"{n_invalid} candidate(s) could not be parsed as SMILES and were already "
-            "excluded from survivors. Call compute_descriptors on one of "
+            f"{stats['invalid']} candidate(s) could not be parsed as SMILES and were "
+            "already excluded from survivors. Call compute_descriptors on one of "
             "invalid_examples if you want to double-check before finalizing."
         )
     return summary
@@ -241,7 +306,9 @@ def _compute_descriptors(smiles_list: list) -> dict:
             continue
         results.append({"smiles": smi, **chem.descriptors(mol)})
     if bad:
-        raise ValueError(f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}")
+        raise ValueError(
+            f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}"
+        )
     return {"count": len(results), "results": results}
 
 
@@ -249,7 +316,14 @@ def _similarity_to_actives(run, smiles_list: list) -> dict:
     if not smiles_list:
         raise ValueError("smiles_list must not be empty")
     smiles_list = smiles_list[:_MAX_BATCH]
-    active_fps, active_ids = chem.build_active_fps(run.known_actives)
+    # Cache active fps on run — build_active_fps re-parses all actives each
+    # call, which is wasteful when the agent spot-checks multiple times.
+    if getattr(run, "_cached_active_fps", None) is None:
+        fps, ids = chem.build_active_fps(run.known_actives)
+        run._cached_active_fps = fps
+        run._cached_active_ids = ids
+    active_fps = run._cached_active_fps
+    active_ids = run._cached_active_ids
     results, bad = [], []
     for smi in smiles_list:
         mol = chem.parse(smi)
@@ -258,60 +332,101 @@ def _similarity_to_actives(run, smiles_list: list) -> dict:
             continue
         sim, idx = chem.max_tanimoto(chem.fingerprint(mol), active_fps)
         nearest = active_ids[idx] if 0 <= idx < len(active_ids) else None
-        results.append({"smiles": smi, "max_similarity": sim, "nearest_active_index": nearest})
+        results.append(
+            {"smiles": smi, "max_similarity": sim, "nearest_active_index": nearest}
+        )
     if bad:
-        raise ValueError(f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}")
+        raise ValueError(
+            f"could not parse {len(bad)} of {len(smiles_list)} SMILES: {bad}"
+        )
     return {"count": len(results), "results": results}
 
 
-def _rank_survivors(run, top_n: int = 600, weights: dict = None) -> dict:
-    weights = weights or {}
-    w_sim = weights.get("similarity", 0.6)
-    w_qed = weights.get("qed", 0.3)
-    w_pains = weights.get("pains", 0.1)
+def _rank_survivors(
+    run,
+    top_n: int = 600,
+    weights: dict = None,
+    diversity: bool = True,
+    profile: str | None = None,
+) -> dict:
+    selected_profile = (profile or getattr(run, "ranking_profile", "balanced")).lower()
+    run.ranking_profile = selected_profile
+    profile_cfg = chem.resolve_ranking_profile(selected_profile)
+    w = {**profile_cfg["weights"], **(weights or {})}
+    score_mode = profile_cfg["score_mode"]
+    confidence_policy = profile_cfg["confidence_policy"]
 
     survivors = run.survivors
     active_ids = run.active_ids
+
     scored = []
     for s in survivors:
+        score = chem.compute_score(s, w, score_mode=score_mode)
         sim = s["max_similarity"]
-        score = w_sim * sim + w_qed * s["qed"] + w_pains * (0.0 if s["pains_flag"] else 1.0)
-        conf = chem._confidence(sim, s["lipinski_pass"])
+        conf = chem._confidence(score, sim, s["lipinski_pass"], confidence_policy)
         if conf == "Low":
             continue
-        idx = int(s["nearest_active"].split("#")[-1]) if "#" in s["nearest_active"] else -1
-        nearest = active_ids[idx] if 0 <= idx < len(active_ids) else s["nearest_active"]
-        reason = (
-            f"{sim:.2f} Tanimoto to {nearest} (known active); "
-            f"{'passes' if s['lipinski_pass'] else 'fails'} Lipinski; "
-            f"{'no PAINS' if not s['pains_flag'] else 'PAINS flagged'}."
+        idx = (
+            int(s["nearest_active"].split("#")[-1])
+            if "#" in s["nearest_active"]
+            else -1
         )
+        nearest = active_ids[idx] if 0 <= idx < len(active_ids) else s["nearest_active"]
         scored.append(
             {
                 "smiles": s["smiles"],
-                "score": round(min(score, 0.99), 3),
+                "score": score,
                 "confidence": conf,
-                "reason": reason,
+                "reason": chem._build_reason(s, score, nearest),
                 "nearest_active": nearest,
                 "max_similarity": sim,
-                "is_known_active": bool(s.get("label")) if s.get("label") is not None else False,
+                "scaffold": s.get("scaffold", ""),
+                "sa_score": s.get("sa_score"),
+                "is_diversified_generated": bool(
+                    s.get("is_diversified_generated", False)
+                ),
+                "is_known_active": (
+                    bool(s.get("label")) if s.get("label") is not None else False
+                ),
             }
         )
 
     scored.sort(key=lambda r: r["score"], reverse=True)
-    top = scored[:top_n]
+
+    if diversity:
+        top = chem.diversity_rerank(scored, top_n)
+    else:
+        top = scored[:top_n]
+
     for i, r in enumerate(top, 1):
         r["rank"] = i
 
     run.ranked = top
 
     n_in = len(run.candidates)
-    emit(run, {"type": "funnel", "payload": {"input": n_in, "filtered": len(survivors), "ranked": len(top)}})
+    emit(
+        run,
+        {
+            "type": "funnel",
+            "payload": {
+                "input": (run.screen_stats or {}).get("input", n_in),
+                "filtered": len(survivors),
+                "ranked": len(top),
+                "diversified_added": (run.screen_stats or {}).get(
+                    "diversified_added", 0
+                ),
+            },
+        },
+    )
 
     scores = [r["score"] for r in top]
+    n_scaffolds = len({r.get("scaffold", "") for r in top})
     return {
-        "weights_used": {"similarity": w_sim, "qed": w_qed, "pains": w_pains},
+        "profile": selected_profile,
+        "weights_used": w,
+        "diversity_enabled": diversity,
         "ranked_count": len(top),
+        "unique_scaffolds": n_scaffolds,
         "score_range": [min(scores), max(scores)] if scores else [None, None],
         "top_examples": top[:_MAX_EXAMPLES],
     }
@@ -321,6 +436,49 @@ def _get_funnel_stats(run) -> dict:
     if run.screen_stats is None:
         raise ValueError("no screen has been run yet — call screen_candidates first")
     return dict(run.screen_stats)
+
+
+def _submit_ranking(
+    run, evidence_notes: list = None, yield_ok: bool = True, replan_reason: str = None
+) -> dict:
+    """Accept the critic's structured evidence and attach it to run.ranked
+    using canonical SMILES matching. Returns match stats so the model can
+    see if any notes failed to attach."""
+    if not run.ranked:
+        raise ValueError("no ranking exists yet — call rank_survivors first")
+
+    matched = 0
+    unmatched_smiles: list[str] = []
+
+    if evidence_notes:
+        # Build lookup by canonical SMILES for robust matching
+        ranked_by_smi = {}
+        for r in run.ranked:
+            canonical_smi = chem.canonical(r["smiles"]) or r["smiles"]
+            ranked_by_smi[canonical_smi] = r
+
+        for note in evidence_notes:
+            raw_smi = note.get("smiles", "")
+            canonical_smi = chem.canonical(raw_smi) or raw_smi
+            target_row = ranked_by_smi.get(canonical_smi)
+            if target_row:
+                target_row["evidence_used"] = note.get("evidence_used", [])
+                matched += 1
+            else:
+                unmatched_smiles.append(raw_smi)
+
+    run.critic_yield_ok = yield_ok
+    run.critic_replan_reason = replan_reason
+
+    return {
+        "accepted": True,
+        "evidence_matched": matched,
+        "evidence_unmatched": len(unmatched_smiles),
+        "unmatched_examples": unmatched_smiles[:_MAX_EXAMPLES],
+        "yield_ok": yield_ok,
+        "replan_reason": replan_reason,
+        "ranked_count": len(run.ranked),
+    }
 
 
 async def execute_tool(run, name: str, args: dict) -> dict:
@@ -337,4 +495,6 @@ async def execute_tool(run, name: str, args: dict) -> dict:
         return _rank_survivors(run, **args)
     if name == "get_funnel_stats":
         return _get_funnel_stats(run)
+    if name == "submit_ranking":
+        return _submit_ranking(run, **args)
     raise ValueError(f"unknown tool: {name!r}")
