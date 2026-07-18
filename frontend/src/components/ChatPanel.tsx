@@ -18,8 +18,8 @@ interface Props {
 
 const GREETING =
   "Triage Copilot. I can help you pick a target, check your library, and " +
-  "once the run starts I'll explain every decision the agents make. What " +
-  "are you screening?";
+  "once the run starts, I can help explain what's going on or answer questions about " +
+  "the process. What would you like to know?";
 
 function chipsFor(status: RunStatus): string[] {
   if (status === "idle") return ["How do I start a run?", "What public databases are used in the report?", "What does the diversity setting do?"];
