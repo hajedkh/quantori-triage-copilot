@@ -1,6 +1,6 @@
 # Quantori Target Triage Copilot
 
-![Architecture diagram](./quantoriarchitecture-1.drawio.png)
+![Architecture diagram](./quantoriarchitecturefinal.drawio.png)
 
 Target Triage Copilot is an interactive, human-in-the-loop small-molecule
 triage application. It combines deterministic RDKit chemistry with agentic
